@@ -1,3 +1,4 @@
+#include "platform/web_watchdog.h"
 #include "memory.h"
 #include "hle_stubs.h"
 #include "ppc_runtime.h"
@@ -44,6 +45,7 @@ uint64_t ReadSystemTime()
 // OSGetTime -> returns 64-bit time base (hi in r3, lo in r4).
 extern "C" void OS__GetTime_HLE(CpuContext* ctx)
 {
+    MkwWebWatchdog();
     if (!ctx) {
         return;
     }

@@ -1,5 +1,6 @@
 // Interrupt masking/dispatch plus the EXI/IPC hardware stubs that hang off it.
 
+#include "platform/web_watchdog.h"
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -59,6 +60,7 @@ extern "C" int32_t OS__DisableInterrupts_801a65ac()
 
 extern "C" int32_t OS__RestoreInterrupts_801a65d4(int32_t level)
 {
+    MkwWebWatchdog();
     const bool prev = g_interrupts_enabled.exchange(level != 0);
     UpdateCurrentContextInterruptFlag(level != 0);
     return prev ? 1 : 0;
@@ -66,6 +68,7 @@ extern "C" int32_t OS__RestoreInterrupts_801a65d4(int32_t level)
 
 extern "C" int32_t OS__EnableInterrupts_801a65c0()
 {
+    MkwWebWatchdog();
     const bool prev = g_interrupts_enabled.exchange(true);
     UpdateCurrentContextInterruptFlag(true);
     return prev ? 1 : 0;

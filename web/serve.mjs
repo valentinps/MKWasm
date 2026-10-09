@@ -25,8 +25,20 @@ const types = {
 };
 const port = Number(process.env.PORT ?? 8080);
 
+const logRequests = process.env.MKW_SERVE_LOG === '1';
+
 http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
+  if (logRequests && url.pathname.startsWith('/game/')) {
+    // Debug aid (MKW_SERVE_LOG=1): per-request timing for DVD range reads.
+    const started = process.hrtime.bigint();
+    res.on('finish', () => {
+      const ms = Number(process.hrtime.bigint() - started) / 1e6;
+      fs.appendFileSync(path.join(root, 'web-requests.log'),
+                        `${Date.now()} ${ms.toFixed(1)}ms ${res.statusCode} ${req.headers.range ?? '-'} ${url.pathname}
+`);
+    });
+  }
   if (req.method === 'POST' && url.pathname === '/__log') {
     // Debug aid: the page posts window.mkwLog here; it lands in web-run.log at the repo root.
     const out = fs.createWriteStream(path.join(root, 'web-run.log'));
@@ -66,6 +78,8 @@ http.createServer((req, res) => {
       'Content-Type': types[path.extname(file)] ?? 'application/octet-stream',
       'Accept-Ranges': 'bytes',
       'Cache-Control': 'no-cache',
+      // Lets the page use the JS Self-Profiling API (new Profiler()) for wasm/JS sampling.
+      'Document-Policy': 'js-profiling',
     };
     const range = /^bytes=(\d+)-(\d*)$/.exec(req.headers.range ?? '');
     if (range) {

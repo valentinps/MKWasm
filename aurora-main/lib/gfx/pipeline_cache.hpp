@@ -33,4 +33,9 @@ bool try_pipeline(PipelineRef ref, wgpu::RenderPipeline& pipeline);
 // path. Separate from wait_pipeline so skip-unready mode never becomes blocking for other passes.
 bool wait_pipeline_for_persistent_pass(PipelineRef ref, wgpu::RenderPipeline& pipeline);
 
+// Pipeline factories create through this. On the web, while the cache is compiling a queued
+// pipeline it returns null and finishes through the browser's background compiler
+// (createRenderPipelineAsync) instead of stalling the frame.
+wgpu::RenderPipeline create_render_pipeline(const wgpu::RenderPipelineDescriptor& descriptor);
+
 } // namespace aurora::gfx

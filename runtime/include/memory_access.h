@@ -239,9 +239,25 @@ MKW_MEMORY_FORCE_INLINE uint8_t* ResolveRangeHost(uint32_t base, int32_t minOffs
         return nullptr;
     }
 #if defined(MKW_GUEST_FLAT_TABLED)
-    // No contiguous guest view: ranges take the per-access resolved path.
-    (void)needsWrite;
-    return nullptr;
+    // Both ends of the range must resolve through the same host bias (one linear mapping;
+    // length <= 1 MiB spans at most two pages). Reads use the readable table, writes the
+    // writable one, so deferred-EFB, MMIO and executable pages keep the checked path.
+    const uint32_t guestEnd = guestStart + (length - 1);
+    const uint32_t firstPage = guestStart >> kPageShift;
+    const uint32_t lastPage = guestEnd >> kPageShift;
+    uintptr_t bias = 0;
+    if (needsRead) {
+        bias = g_fullReadablePageBias[firstPage];
+        if (bias == 0 || g_fullReadablePageBias[lastPage] != bias) return nullptr;
+    }
+    if (needsWrite) {
+        const uintptr_t writeBias = g_fullWritablePageBias[firstPage];
+        if (writeBias == 0 || g_fullWritablePageBias[lastPage] != writeBias) return nullptr;
+        if (bias != 0 && bias != writeBias) return nullptr;
+        bias = writeBias;
+    }
+    if (bias == 0) return nullptr;
+    return reinterpret_cast<uint8_t*>((bias - 1u) + guestStart);
 #else
     if (needsWrite &&
         (FlatWriteNeedsPolicy(guestStart) || FlatWriteNeedsPolicy(guestStart + (length - 1))))

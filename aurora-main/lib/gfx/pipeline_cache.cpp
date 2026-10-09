@@ -21,7 +21,12 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 #include <fmt/format.h>
+#include <magic_enum.hpp>
 #include <tracy/Tracy.hpp>
+
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/emscripten.h>
+#endif
 
 namespace aurora::gfx {
 static Module Log("aurora::gfx::pipeline_cache");
@@ -56,6 +61,9 @@ struct SdlVfsSqliteFile {
 
 static std::mutex g_pipelineMutex;
 static bool g_hasPipelineThread = false;
+// Web: no compiler threads, but the browser compiles pipelines in the background. Queued
+// pipelines are handed to createRenderPipelineAsync and land in g_pipelines from its callback.
+static bool g_asyncPipelines = false;
 static bool g_pipelineFrameActive = false;
 static std::atomic_bool g_skipUnreadyGxPipelines = false;
 static size_t g_pipelinesPerFrame = 0;
@@ -360,12 +368,6 @@ static PipelineCacheWrite make_pipeline_cache_write(ShaderType type, PipelineRef
 }
 
 static void enqueue_pipeline_cache_write(PipelineCacheWrite write) {
-#if defined(__EMSCRIPTEN__)
-  // No writer thread on the web, and the database lives in MEMFS where it would not
-  // outlive the page anyway; recipes are still read from the seeded cache.
-  (void)write;
-  return;
-#endif
   if (g_pipelineCacheBroken || g_pipelineCacheDb == nullptr) {
     return;
   }
@@ -454,7 +456,8 @@ static PipelineRef find_pipeline_impl(ShaderType type, const PipelineConfig& con
   std::optional<PipelineCacheWrite> cacheWrite;
   {
     std::scoped_lock guard{g_pipelineMutex};
-    const bool deferGxPipeline = g_hasPipelineThread && g_pipelineFrameActive && type == ShaderType::GX;
+    const bool deferGxPipeline =
+        (g_hasPipelineThread || g_asyncPipelines) && g_pipelineFrameActive && type == ShaderType::GX;
     const bool skipUnreadyGxPipeline = deferGxPipeline && g_skipUnreadyGxPipelines.load(std::memory_order_relaxed);
     auto pipelineIt = g_pipelines.find(hash);
     if (pipelineIt != g_pipelines.end()) {
@@ -905,6 +908,46 @@ static bool write_pipeline_cache_record(const PipelineCacheWrite& write) {
   return true;
 }
 
+#if defined(__EMSCRIPTEN__)
+// Web counterpart of pipeline_cache_writer(): one batch per frame on the calling thread. The
+// database lives under the IndexedDB-backed user directory, so recipes survive reloads.
+static void flush_pipeline_cache_writes() {
+  if (g_pipelineCacheBroken || g_pipelineCacheDb == nullptr) {
+    return;
+  }
+  std::deque<PipelineCacheWrite> batch;
+  {
+    std::lock_guard lock{g_pipelineCacheWriterMutex};
+    if (g_pipelineCacheWriteQueue.empty()) {
+      return;
+    }
+    batch.swap(g_pipelineCacheWriteQueue);
+    g_pipelineCachePendingWrites.clear();
+  }
+  bool writeFailed = false;
+  {
+    sqlite::Transaction tx(g_pipelineCacheDb, Log, true);
+    if (!tx) {
+      writeFailed = true;
+    } else {
+      for (const auto& write : batch) {
+        if (!write_pipeline_cache_record(write)) {
+          writeFailed = true;
+          break;
+        }
+      }
+      if (!writeFailed) {
+        tx.commit();
+      }
+    }
+  }
+  if (writeFailed) {
+    Log.error("Failed to write pipeline cache batch");
+    pipeline_cache_abort();
+  }
+}
+#endif
+
 static void pipeline_cache_writer() {
 #ifdef TRACY_ENABLE
   tracy::SetThreadName("Pipeline cache writer thread");
@@ -1031,7 +1074,97 @@ static void pipeline_worker() {
   }
 }
 
+#if defined(__EMSCRIPTEN__)
+using AsyncPipelineSink = std::function<void(wgpu::RenderPipeline)>;
+static AsyncPipelineSink* g_asyncPipelineSink = nullptr;
+static size_t g_asyncPipelinesInFlight = 0;
+// Enough to keep the browser's compiler busy without flooding the GPU process.
+constexpr size_t MaxAsyncPipelinesInFlight = 64;
+
+static void finish_async_pipeline(PipelineRef hash, uint32_t firstFrameUsed, wgpu::RenderPipeline pipeline) {
+  --g_asyncPipelinesInFlight;
+  {
+    std::lock_guard lock{g_pipelineMutex};
+    g_pendingPipelines.erase(hash);
+    if (pipeline) {
+      const auto [_, inserted] = g_pipelines.try_emplace(hash, CachedPipeline{
+                                                                   .pipeline = std::move(pipeline),
+                                                                   .firstFrameUsed = firstFrameUsed,
+                                                               });
+      if (inserted) {
+        ++createdPipelines;
+      }
+    }
+  }
+  g_pipelineCv.notify_all();
+  --queuedPipelines;
+  if (queuedPipelines.load() == 0) {
+    note_pipeline_queue_drained();
+  }
+}
+
+static void start_async_pipeline(PendingPipeline pending) {
+  const PipelineRef hash = pending.hash;
+  const uint32_t firstFrameUsed = pending.firstFrameUsed;
+  AsyncPipelineSink sink = [hash, firstFrameUsed](wgpu::RenderPipeline pipeline) {
+    finish_async_pipeline(hash, firstFrameUsed, std::move(pipeline));
+  };
+  ++g_asyncPipelinesInFlight;
+  g_asyncPipelineSink = &sink;
+  auto pipeline = pending.create();
+  g_asyncPipelineSink = nullptr;
+  if (pipeline) {
+    // The factory created synchronously (not a GX pipeline); finish now.
+    finish_async_pipeline(hash, firstFrameUsed, std::move(pipeline));
+  }
+}
+
+// Starts queued compiles, priority (first-use) pipelines first.
+static void launch_async_pipelines() {
+  while (g_asyncPipelinesInFlight < MaxAsyncPipelinesInFlight) {
+    PendingPipeline pending;
+    {
+      std::lock_guard lock{g_pipelineMutex};
+      if (g_priorityPipelines.empty() && g_backgroundPipelines.empty()) {
+        return;
+      }
+      auto& source = !g_priorityPipelines.empty() ? g_priorityPipelines : g_backgroundPipelines;
+      pending = std::move(source.front());
+      source.pop_front();
+    }
+    start_async_pipeline(std::move(pending));
+  }
+}
+#endif
+
+wgpu::RenderPipeline create_render_pipeline(const wgpu::RenderPipelineDescriptor& descriptor) {
+#if defined(__EMSCRIPTEN__)
+  if (g_asyncPipelineSink != nullptr) {
+    // The descriptor is consumed during this call; only the sink outlives it.
+    webgpu::g_device.CreateRenderPipelineAsync(
+        &descriptor, wgpu::CallbackMode::AllowSpontaneous,
+        [sink = *g_asyncPipelineSink](wgpu::CreatePipelineAsyncStatus status, wgpu::RenderPipeline pipeline,
+                                      wgpu::StringView message) {
+          if (status != wgpu::CreatePipelineAsyncStatus::Success) {
+            Log.error("Async pipeline creation failed ({}): {}", magic_enum::enum_name(status), message);
+            pipeline = {};
+          }
+          sink(std::move(pipeline));
+        });
+    return {};
+  }
+#endif
+  return webgpu::g_device.CreateRenderPipeline(&descriptor);
+}
+
 static void build_synchronous_pipelines_for_frame() {
+#if defined(__EMSCRIPTEN__)
+  flush_pipeline_cache_writes();
+  if (g_asyncPipelines) {
+    launch_async_pipelines();
+    return;
+  }
+#endif
   while (g_pipelinesPerFrame < BuildPipelinesPerFrame) {
     PendingPipeline pending;
     {
@@ -1135,6 +1268,8 @@ static void load_pipeline_cache() {
 
 static void start_pipeline_cache_writer() {
 #if defined(__EMSCRIPTEN__)
+  // No writer thread on the web: flush_pipeline_cache_writes() drains the queue once per frame.
+  prepare_pipeline_cache_db();
   return;
 #endif
   if (!prepare_pipeline_cache_db()) {
@@ -1181,6 +1316,9 @@ void initialize_pipeline_cache() {
   if (webgpu::g_backendType == wgpu::BackendType::OpenGL || webgpu::g_backendType == wgpu::BackendType::OpenGLES ||
       webgpu::g_backendType == wgpu::BackendType::WebGPU) {
     g_hasPipelineThread = false;
+#if defined(__EMSCRIPTEN__)
+    g_asyncPipelines = true;
+#endif
   } else {
     g_hasPipelineThread = true;
     const size_t workerCount = pipeline_worker_count();
@@ -1280,6 +1418,16 @@ static bool wait_pipeline_impl(PipelineRef ref, wgpu::RenderPipeline& pipeline, 
       // A persistent resolve is the last chance to produce its texture, so timing out here corrupts it
       // permanently. Only a pass marked requireReadyPipelines takes this path.
     }
+#if defined(__EMSCRIPTEN__)
+    if (g_asyncPipelines) {
+      while (!finished()) {
+        lock.unlock();
+        launch_async_pipelines();
+        emscripten_sleep(0);  // completion callbacks arrive from the browser's event loop
+        lock.lock();
+      }
+    } else
+#endif
     g_pipelineCv.wait(lock, finished);
   }
   const auto it = g_pipelines.find(ref);

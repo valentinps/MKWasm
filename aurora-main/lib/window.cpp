@@ -370,11 +370,6 @@ bool create_window(AuroraBackend backend) {
   flags |= SDL_WINDOW_FULLSCREEN;
 #else
   flags |= SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE;
-#if defined(__EMSCRIPTEN__)
-  // The page is the window: SDL sizes the canvas (and its devicePixelRatio backing store) to
-  // the document and reports resizes like a desktop window resize.
-  flags |= SDL_WINDOW_FILL_DOCUMENT;
-#endif
   if (g_config.startFullscreen) {
     flags |= SDL_WINDOW_FULLSCREEN;
   }
@@ -435,7 +430,9 @@ bool create_window(AuroraBackend backend) {
     Log.error("Failed to create window: {}", SDL_GetError());
     return false;
   }
+#if !defined(__EMSCRIPTEN__)
   SDL_SetWindowMinimumSize(g_window, 640, 480);
+#endif
   g_displayMode.store(g_config.startFullscreen ? AURORA_DISPLAY_MODE_BORDERLESS : AURORA_DISPLAY_MODE_WINDOWED,
                       std::memory_order_release);
 #if defined(_WIN32)
@@ -480,6 +477,12 @@ void destroy_window() {
 void show_window() {
   if (g_window != nullptr) {
     TRY_WARN(SDL_ShowWindow(g_window), "Failed to show window: {}", SDL_GetError());
+#if defined(__EMSCRIPTEN__)
+    // The page is the window: SDL sizes the canvas (and its devicePixelRatio backing store) to
+    // the document and reports browser resizes like desktop window resizes. Applied once the
+    // window is shown, when its pixel ratio and size are settled.
+    TRY_WARN(SDL_SetWindowFillDocument(g_window, true), "Failed to fill the document: {}", SDL_GetError());
+#endif
   }
 }
 
@@ -716,6 +719,12 @@ void set_display_mode(AuroraDisplayMode mode) {
     Log.warn("Failed to change display mode: {}", SDL_GetError());
     return;
   }
+#if defined(__EMSCRIPTEN__)
+  // Leaving (or changing) fullscreen resets SDL's window state; the page stays the window.
+  if (mode == AURORA_DISPLAY_MODE_WINDOWED) {
+    TRY_WARN(SDL_SetWindowFillDocument(g_window, true), "Failed to fill the document: {}", SDL_GetError());
+  }
+#endif
   g_displayMode.store(mode, std::memory_order_release);
   g_nativeResizePending.store(true, std::memory_order_release);
   TRY_WARN(push_custom_event(CustomEvent::FutureResize), "Failed to queue fullscreen resize event: {}",
@@ -725,6 +734,12 @@ void set_display_mode(AuroraDisplayMode mode) {
 AuroraDisplayMode get_display_mode() { return g_displayMode.load(std::memory_order_acquire); }
 
 void set_window_size(uint32_t width, uint32_t height) {
+#if defined(__EMSCRIPTEN__)
+  // The window is the page (fill-document); sizes come from the browser.
+  (void)width;
+  (void)height;
+  return;
+#endif
   TRY_WARN(SDL_RestoreWindow(g_window), "Failed to un-maximize window: {}", SDL_GetError());
   TRY_WARN(SDL_SetWindowSize(g_window, width, height), "Failed to set window size: {}", SDL_GetError());
 }

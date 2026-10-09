@@ -29,6 +29,8 @@
 #endif
 #if defined(__EMSCRIPTEN__)
 #include <emscripten/emscripten.h>
+// platform/web/mkw_web.js: JSPI-suspending sleep with sub-millisecond accuracy.
+extern "C" int32_t mkw_web_sleep(double milliseconds);
 #endif
 
 #include <aurora/aurora.h>
@@ -175,7 +177,30 @@ void SleepPreciselyUntil(Clock::time_point deadline, bool finishWithSpin = false
     (void)finishWithSpin;
     (void)spinWindow;
     const auto remainingMs = std::chrono::duration<double, std::milli>(deadline - now).count();
-    emscripten_sleep(static_cast<unsigned int>(remainingMs));
+    {
+        // Busy/idle split between yields, logged every 2 s: tells CPU-bound from GPU-bound.
+        static Clock::time_point s_lastWake = now;
+        static Clock::time_point s_windowStart = now;
+        static double s_busyMs = 0.0, s_sleptMs = 0.0, s_maxBusyMs = 0.0;
+        static uint32_t s_yields = 0;
+        const double busy = std::chrono::duration<double, std::milli>(now - s_lastWake).count();
+        s_busyMs += busy;
+        s_maxBusyMs = std::max(s_maxBusyMs, busy);
+        ++s_yields;
+        mkw_web_sleep(remainingMs);
+        const auto woke = Clock::now();
+        s_sleptMs += std::chrono::duration<double, std::milli>(woke - now).count();
+        s_lastWake = woke;
+        if (woke - s_windowStart >= 2s) {
+            const double windowMs = std::chrono::duration<double, std::milli>(woke - s_windowStart).count();
+            std::printf("[web-perf] busy %.0f%% (%.1f ms/yield, max %.1f ms), slept %.0f%%, %u yields in %.0f ms\n",
+                        100.0 * s_busyMs / windowMs, s_busyMs / s_yields, s_maxBusyMs,
+                        100.0 * s_sleptMs / windowMs, s_yields, windowMs);
+            s_windowStart = woke;
+            s_busyMs = s_sleptMs = s_maxBusyMs = 0.0;
+            s_yields = 0;
+        }
+    }
     return;
 #endif
     const auto timerDeadline =

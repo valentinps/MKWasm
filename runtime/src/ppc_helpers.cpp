@@ -5,6 +5,7 @@
 #include "memory.h"
 #include "runtime_log.h"
 #include "timebase_contract.h"
+#include "platform/web_watchdog.h"
 
 #include <array>
 #include <bitset>
@@ -400,6 +401,7 @@ extern "C" uint32_t PPC_Eciwx(uint32_t addr)
 
 extern "C" uint32_t PPC_Mftb()
 {
+    MkwWebWatchdog();  // time-base polling is the classic guest spin-wait
     return static_cast<uint32_t>(GetTimeBase());
 }
 

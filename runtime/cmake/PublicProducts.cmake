@@ -258,7 +258,10 @@ function(mkw_configure_product target)
             -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=512MB -sMAXIMUM_MEMORY=4GB
             -sSTACK_SIZE=8MB -sENVIRONMENT=web
             -sEXPORT_EXCEPTION_HANDLING_HELPERS=1 -sEXCEPTION_STACK_TRACES=1
-            -sEXPORTED_RUNTIME_METHODS=FS,ENV,callMain,addRunDependency,removeRunDependency
+            # Keep function names in the name section so profiles and traces are readable.
+            --profiling-funcs
+            -sEXPORTED_RUNTIME_METHODS=FS,ENV,IDBFS,callMain,addRunDependency,removeRunDependency
+            -lidbfs.js
             "--js-library=${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/mkw_web.js"
             # Runtime-owned assets only (no game data): the files the native build copies
             # next to the executable. SDL_GetBasePath() is "/" on the web, where Aurora
@@ -267,7 +270,8 @@ function(mkw_configure_product target)
             "--preload-file=${MKW_RUNTIME_SOURCE_DIR}/assets/wii@/app/wii_bootstrap"
             "--preload-file=${MKW_RUNTIME_SOURCE_DIR}/assets/certs/cacert.pem@/app/cacert.pem"
             "--preload-file=${MKW_RUNTIME_SOURCE_DIR}/assets/pipeline/initial_pipeline_cache.db@/initial_pipeline_cache.db")
-        set_target_properties(${target} PROPERTIES SUFFIX ".js")
+        set_target_properties(${target} PROPERTIES SUFFIX ".js"
+            LINK_DEPENDS "${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/mkw_web.js")
     endif()
     if(MKW_PLATFORM_WINDOWS)
         target_link_libraries(${target} PRIVATE

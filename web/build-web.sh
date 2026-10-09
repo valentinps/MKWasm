@@ -17,7 +17,8 @@ BUILD="$ROOT/web-build"
 JOBS="${JOBS:-$(nproc)}"
 
 # Every object must agree on wasm EH and SIMD; aurora and its dependencies included.
-WEB_FLAGS="-msimd128 -mavx2 -mfma -fwasm-exceptions"
+# Relaxed SIMD gives fused paired-single multiply-adds (ps_madd is fused on Gekko).
+WEB_FLAGS="-msimd128 -mrelaxed-simd -mavx2 -mfma -fwasm-exceptions"
 
 step="${1:-build}"
 shift || true

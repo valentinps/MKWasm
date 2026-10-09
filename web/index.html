@@ -73,6 +73,23 @@ enabled = false
 dvd_root = "${DVD_ROOT}"
 `;
 
+  // Mirrors MEMFS changes under DATA_HOME back to IndexedDB: periodically, and whenever the
+  // tab is hidden or closed (the last chance to save).
+  let userDataSyncing = false;
+  const persistUserData = () => {
+    if (userDataSyncing || typeof FS === 'undefined') return;
+    userDataSyncing = true;
+    FS.syncfs(false, (error) => {
+      userDataSyncing = false;
+      if (error) console.warn('Saving user data failed:', error);
+    });
+  };
+  const startUserDataSync = () => {
+    setInterval(persistUserData, 5000);
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') persistUserData(); });
+    window.addEventListener('pagehide', persistUserData);
+  };
+
   var Module = {
     canvas: document.getElementById('canvas'),
     mkwDvdRoot: DVD_ROOT,
@@ -85,8 +102,18 @@ dvd_root = "${DVD_ROOT}"
       // Game files stay on the server and are range-read on demand (mkw_web_read_file);
       // only the disc's file table and the directory skeleton live in MEMFS.
       ENV.XDG_DATA_HOME = DATA_HOME;
-      FS.mkdirTree(`${DATA_HOME}/WiiCompiled`);
-      FS.writeFile(`${DATA_HOME}/WiiCompiled/Config.toml`, CONFIG);
+      // User data (Config.toml, NAND saves and licences, pipeline cache) lives in IndexedDB.
+      FS.mkdirTree(DATA_HOME);
+      FS.mount(IDBFS, {}, DATA_HOME);
+      addRunDependency('userdata');
+      FS.syncfs(true, (error) => {
+        if (error) console.warn('Loading saved user data failed:', error);
+        FS.mkdirTree(`${DATA_HOME}/WiiCompiled`);
+        const configPath = `${DATA_HOME}/WiiCompiled/Config.toml`;
+        if (!FS.analyzePath(configPath).exists) FS.writeFile(configPath, CONFIG);
+        startUserDataSync();
+        removeRunDependency('userdata');
+      });
       FS.mkdirTree(`${DVD_ROOT}/sys`);
       FS.mkdirTree(`${DVD_ROOT}/files`);
       addRunDependency('fst');

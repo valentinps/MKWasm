@@ -36,9 +36,132 @@ addToLibrary({
   },
 
   // DVD reads (DvdReadContract::ReadExact). Paths under Module.mkwDvdRoot are served from
-  // Module.mkwGameUrl with HTTP range requests; the guest fiber is suspended meanwhile.
+  // Module.mkwGameUrl with HTTP range requests, through a block cache with read-ahead.
+  //
+  // A guest DVD read suspends the whole module (JSPI) until it completes, while on a Wii the
+  // game keeps running during reads. Streamed data (THP movies, BRSTM music) issues many small
+  // sequential reads, so uncached round trips stalled every frame. Cached reads return a plain
+  // number, which a Suspending import passes through without suspending at all.
+  $MkwDisc: {
+    blockSize: 1 << 20,
+    maxBytes: 512 << 20,
+    blocks: new Map(),   // `${url}#${index}` -> {bytes, promise, used}
+    sizes: new Map(),    // url -> file size, learned from Content-Range
+    missing: new Set(),  // urls that returned 404
+    cachedBytes: 0,
+    clock: 0,
+
+    key(url, index) { return `${url}#${index}`; },
+
+    evict() {
+      if (MkwDisc.cachedBytes <= MkwDisc.maxBytes) return;
+      const entries = [...MkwDisc.blocks.entries()].filter(([, b]) => b.bytes).sort((a, b) => a[1].used - b[1].used);
+      for (const [key, block] of entries) {
+        if (MkwDisc.cachedBytes <= MkwDisc.maxBytes * 0.8) break;
+        MkwDisc.cachedBytes -= block.bytes.length;
+        MkwDisc.blocks.delete(key);
+      }
+    },
+
+    store(url, index, bytes) {
+      const key = MkwDisc.key(url, index);
+      const block = MkwDisc.blocks.get(key) ?? {};
+      block.bytes = bytes;
+      block.promise = null;
+      block.used = ++MkwDisc.clock;
+      MkwDisc.blocks.set(key, block);
+      MkwDisc.cachedBytes += bytes.length;
+    },
+
+    fetchBlock(url, index) {
+      const key = MkwDisc.key(url, index);
+      const existing = MkwDisc.blocks.get(key);
+      if (existing) return existing.bytes ?? existing.promise;
+      const size = MkwDisc.sizes.get(url);
+      const start = index * MkwDisc.blockSize;
+      if (size !== undefined && start >= size) return null;
+      const promise = (async () => {
+        const end = start + MkwDisc.blockSize - 1;
+        let response;
+        try {
+          response = await fetch(url, {headers: {Range: `bytes=${start}-${end}`}});
+        } catch (e) {
+          err(`mkw_web_read_file: ${url}: ${e}`);
+          MkwDisc.blocks.delete(key);
+          return null;
+        }
+        if (response.status === 404) {
+          MkwDisc.missing.add(url);
+          MkwDisc.blocks.delete(key);
+          return null;
+        }
+        if (response.status === 416) {
+          const total = /\/(\d+)$/.exec(response.headers.get('Content-Range') ?? '');
+          if (total) MkwDisc.sizes.set(url, Number(total[1]));
+          MkwDisc.blocks.delete(key);
+          return null;
+        }
+        if (!response.ok) {
+          err(`mkw_web_read_file: ${url}: HTTP ${response.status}`);
+          MkwDisc.blocks.delete(key);
+          return null;
+        }
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        if (response.status === 200) {
+          // The server ignored Range and sent the whole file: split it into blocks.
+          MkwDisc.sizes.set(url, bytes.length);
+          MkwDisc.blocks.delete(key);
+          for (let i = 0; i * MkwDisc.blockSize < bytes.length; i++) {
+            MkwDisc.store(url, i, bytes.subarray(i * MkwDisc.blockSize, (i + 1) * MkwDisc.blockSize));
+          }
+          MkwDisc.evict();
+          return MkwDisc.blocks.get(key)?.bytes ?? null;
+        }
+        const total = /\/(\d+)$/.exec(response.headers.get('Content-Range') ?? '');
+        if (total) MkwDisc.sizes.set(url, Number(total[1]));
+        MkwDisc.store(url, index, bytes);
+        MkwDisc.evict();
+        return bytes;
+      })();
+      MkwDisc.blocks.set(key, {bytes: null, promise, used: ++MkwDisc.clock});
+      return promise;
+    },
+
+    // Copies a fully cached range into the heap: the byte count, -2 past the end, or
+    // undefined when some block is not cached yet.
+    tryCopy(url, offset, length, destination) {
+      const size = MkwDisc.sizes.get(url);
+      if (size === undefined) return undefined;
+      if (offset >= size) return -2;
+      const end = Math.min(offset + length, size);
+      const first = Math.floor(offset / MkwDisc.blockSize);
+      const last = Math.floor((end - 1) / MkwDisc.blockSize);
+      for (let i = first; i <= last; i++) {
+        if (!MkwDisc.blocks.get(MkwDisc.key(url, i))?.bytes) return undefined;
+      }
+      let written = 0;
+      for (let i = first; i <= last; i++) {
+        const block = MkwDisc.blocks.get(MkwDisc.key(url, i));
+        block.used = ++MkwDisc.clock;
+        const blockStart = i * MkwDisc.blockSize;
+        const from = Math.max(offset, blockStart) - blockStart;
+        const to = Math.min(end, blockStart + block.bytes.length) - blockStart;
+        HEAPU8.set(block.bytes.subarray(from, to), destination + written);
+        written += to - from;
+      }
+      return written;
+    },
+
+    // Streaming access is sequential: keep the next block warming while this one is used.
+    readAhead(url, offset, length) {
+      const next = Math.floor((offset + length) / MkwDisc.blockSize) + 1;
+      for (const index of [next - 1, next]) MkwDisc.fetchBlock(url, index);
+    },
+  },
+
+  mkw_web_read_file__deps: ['$MkwDisc'],
   mkw_web_read_file__async: true,
-  mkw_web_read_file: async (pathPtr, offset, length, destination) => {
+  mkw_web_read_file: (pathPtr, offset, length, destination) => {
     const path = UTF8ToString(pathPtr);
     const root = Module['mkwDvdRoot'] ?? '/dvd';
     if (!path.startsWith(root + '/')) {
@@ -49,26 +172,98 @@ addToLibrary({
       return 0;
     }
     const url = `${Module['mkwGameUrl'] ?? 'game'}/${path.slice(root.length + 1)}`;
-    let response;
-    try {
-      response = await fetch(url, {headers: {Range: `bytes=${offset}-${offset + length - 1}`}});
-    } catch (e) {
-      err(`mkw_web_read_file: ${url}: ${e}`);
-      return -1;
+    if (MkwDisc.missing.has(url)) return -1;
+    const cached = MkwDisc.tryCopy(url, offset, length, destination);
+    if (cached !== undefined) {
+      if (cached > 0) MkwDisc.readAhead(url, offset, length);
+      return cached;
     }
-    if (response.status === 404) return -1;
-    if (response.status === 416) return -2;
-    if (!response.ok) {
-      err(`mkw_web_read_file: ${url}: HTTP ${response.status}`);
-      return -1;
+    return (async () => {
+      const first = Math.floor(offset / MkwDisc.blockSize);
+      const last = Math.floor((offset + length - 1) / MkwDisc.blockSize);
+      const pending = [];
+      for (let i = first; i <= last; i++) pending.push(MkwDisc.fetchBlock(url, i));
+      await Promise.all(pending);
+      if (MkwDisc.missing.has(url)) return -1;
+      const copied = MkwDisc.tryCopy(url, offset, length, destination);
+      if (copied === undefined) {
+        err(`mkw_web_read_file: ${url}: read ${offset}+${length} failed`);
+        return -1;
+      }
+      if (copied > 0) MkwDisc.readAhead(url, offset, length);
+      return copied;
+    })();
+  },
+
+  // Spin watchdog (include/platform/web_watchdog.h). `free` is refreshed by a heartbeat that
+  // only runs while the main thread is idle, so now - free is how long the page has gone
+  // without a turn of its event loop.
+  $MkwWatchdog: {
+    free: 0,
+    started: false,
+    reported: false,
+  },
+
+  mkw_web_watchdog__deps: ['$MkwWatchdog', '$MkwYield'],
+  mkw_web_watchdog__async: true,
+  mkw_web_watchdog: () => {
+    const now = performance.now();
+    if (!MkwWatchdog.started) {
+      MkwWatchdog.started = true;
+      MkwWatchdog.free = now;
+      setInterval(() => {
+        MkwWatchdog.free = performance.now();
+        MkwWatchdog.reported = false;
+      }, 5);
+      return 0;
     }
-    let bytes = new Uint8Array(await response.arrayBuffer());
-    if (response.status === 200) {
-      // The server ignored Range and sent the whole file.
-      if (offset >= bytes.length) return -2;
-      bytes = bytes.subarray(offset, offset + length);
+    const stalled = now - MkwWatchdog.free;
+    if (stalled < 50) {
+      return 0;
     }
-    HEAPU8.set(bytes, destination);
-    return bytes.length;
+    if (stalled > 1000 && !MkwWatchdog.reported) {
+      MkwWatchdog.reported = true;
+      const limit = Error.stackTraceLimit;
+      Error.stackTraceLimit = 40;
+      err(`[web-watchdog] page busy for ${stalled | 0} ms without yielding; forcing a yield at:\n${new Error().stack}`);
+      Error.stackTraceLimit = limit;
+    }
+    return MkwYield.now().then(() => {
+      MkwWatchdog.free = performance.now();
+      return 0;
+    });
+  },
+
+  // Precise yields. Nested setTimeout calls are clamped to >= 4 ms, so the guest's 1 ms VI
+  // polling overslept every retrace. A MessageChannel task is not clamped: it lets the event
+  // loop run (input, audio, GPU callbacks, compositing) and comes straight back.
+  $MkwYield: {
+    channel: null,
+    waiters: [],
+    now() {
+      if (!MkwYield.channel) {
+        MkwYield.channel = new MessageChannel();
+        MkwYield.channel.port1.onmessage = () => MkwYield.waiters.shift()?.();
+      }
+      return new Promise((resolve) => {
+        MkwYield.waiters.push(resolve);
+        MkwYield.channel.port2.postMessage(0);
+      });
+    },
+  },
+
+  // Sleeps until `ms` from now with sub-millisecond accuracy: a coarse timer for the bulk,
+  // then unclamped yields until the deadline.
+  mkw_web_sleep__deps: ['$MkwYield'],
+  mkw_web_sleep__async: true,
+  mkw_web_sleep: async (ms) => {
+    const deadline = performance.now() + ms;
+    if (ms > 5) {
+      await new Promise((resolve) => setTimeout(resolve, ms - 4));
+    }
+    do {
+      await MkwYield.now();
+    } while (performance.now() < deadline);
+    return 0;
   },
 });

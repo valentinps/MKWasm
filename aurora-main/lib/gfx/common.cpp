@@ -135,6 +135,12 @@ constexpr size_t FrameSlotCount = 3;
 static std::array<wgpu::Buffer, FrameSlotCount> g_stagingBuffers;
 static size_t currentStagingBuffer = 0;
 static StagingMapState s_mappingState;
+#if defined(__EMSCRIPTEN__)
+// Web: frame data is staged in ordinary memory and handed over with queue.WriteBuffer /
+// WriteTexture. mapAsync resolves on a GPU-process round trip in browsers, which gated
+// every frame on it (the page idled ~70% of the time waiting for the map).
+static std::vector<u8> g_webStaging;
+#endif
 static wgpu::Limits g_cachedLimits;
 // Advanced once per logical frame in the seal prologue, under the renderer GPU mutex and with the
 // producer blocked, so every later reader sees a value that no longer moves.
@@ -904,7 +910,9 @@ void initialize() {
   }
   currentStagingBuffer = 0;
   s_mappingState.reset();
+#if !defined(__EMSCRIPTEN__)
   map_staging_buffer();
+#endif
 
   {
     constexpr std::array layoutEntries{
@@ -1056,8 +1064,16 @@ static bool begin_frame_impl(bool clearEfb, bool capacityResume = false) {
   ZoneScoped;
   {
     ZoneScopedN("Wait for buffer map");
+#if defined(__EMSCRIPTEN__)
+    if (g_webStaging.empty()) {
+      g_webStaging.resize(StagingBufferSize);
+    }
+    s_mappingState.reset();
+    while (false) {
+#else
     map_staging_buffer();
     while (true) {
+#endif
       const auto mappingState = s_mappingState.state();
       if (mappingState == BufferMapState::Mapped) {
         break;
@@ -1092,7 +1108,12 @@ static bool begin_frame_impl(bool clearEfb, bool capacityResume = false) {
     if (size <= 0) {
       return;
     }
+#if defined(__EMSCRIPTEN__)
+    (void)stagingBuf;
+    buf = ByteBuffer{g_webStaging.data() + bufferOffset, static_cast<size_t>(size)};
+#else
     buf = ByteBuffer{static_cast<u8*>(stagingBuf.GetMappedRange(bufferOffset, size)), static_cast<size_t>(size)};
+#endif
     bufferOffset += size;
   };
   mapBuffer(g_verts, VertexBufferSize);
@@ -1148,7 +1169,12 @@ void abort_frame() noexcept {
     g_textureUploads.clear();
     g_textureUpload.release();
   }
+#if defined(__EMSCRIPTEN__)
+  gx::drop_pending_frame_interpolation_uniforms();
+  if (false) {
+#else
   if (s_mappingState.state() == BufferMapState::Mapped) {
+#endif
     // Pending interpolation tasks hold raw pointers into the mapped staging
     // range; they must be dropped before the buffer is unmapped and rotated.
     gx::drop_pending_frame_interpolation_uniforms();
@@ -1185,13 +1211,20 @@ static void end_batch_impl(const wgpu::CommandEncoder& cmd, bool advanceFrame) {
   const auto writeBuffer = [&](ByteBuffer& buf, wgpu::Buffer& out, uint64_t size, std::string_view label) {
     const auto writeSize = buf.size(); // Only need to copy this many bytes
     if (writeSize > 0) {
+#if defined(__EMSCRIPTEN__)
+      // Ordered before this batch's command buffer, exactly like the recorded copy.
+      g_queue.WriteBuffer(out, 0, g_webStaging.data() + bufferOffset, AURORA_ALIGN(writeSize, 4));
+#else
       cmd.CopyBufferToBuffer(g_stagingBuffers[currentStagingBuffer], bufferOffset, out, 0, AURORA_ALIGN(writeSize, 4));
+#endif
       buf.release();
     }
     bufferOffset += size;
     return writeSize;
   };
+#if !defined(__EMSCRIPTEN__)
   g_stagingBuffers[currentStagingBuffer].Unmap();
+#endif
   s_mappingState.reset();
   g_stats.drawCallCount = g_drawCallCount;
   g_stats.mergedDrawCallCount = g_mergedDrawCallCount;
@@ -1204,6 +1237,18 @@ static void end_batch_impl(const wgpu::CommandEncoder& cmd, bool advanceFrame) {
     {
       // Perform texture copies
       for (const auto& item : g_textureUploads) {
+#if defined(__EMSCRIPTEN__)
+        const uint64_t rowPitch = AURORA_ALIGN(item.layout.bytesPerRow, 256);
+        const wgpu::TexelCopyBufferLayout layout{
+            .offset = 0,
+            .bytesPerRow = static_cast<uint32_t>(rowPitch),
+            .rowsPerImage = item.layout.rowsPerImage,
+        };
+        const uint64_t uploadStart = bufferOffset + item.layout.offset;
+        g_queue.WriteTexture(&item.tex, g_webStaging.data() + uploadStart, StagingBufferSize - uploadStart, &layout,
+                             &item.size);
+        continue;
+#endif
         const wgpu::TexelCopyBufferInfo buf{
             .layout =
                 wgpu::TexelCopyBufferLayout{
@@ -1219,8 +1264,10 @@ static void end_batch_impl(const wgpu::CommandEncoder& cmd, bool advanceFrame) {
       g_textureUpload.release();
     }
   }
+#if !defined(__EMSCRIPTEN__)
   currentStagingBuffer = (currentStagingBuffer + 1) % g_stagingBuffers.size();
   map_staging_buffer();
+#endif
   g_currentRenderPass = UINT32_MAX;
   for (auto& array : gx::g_gxState.arrays) {
     array.cachedRange = {};
