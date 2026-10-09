@@ -387,7 +387,14 @@ inline uint16_t PpcQuantizePairPsqU8Scale61PackedInline(double value)
     const __m128 scaled = _mm_mul_ps(PpcPsToM128Inline(value), _mm_set1_ps(0.125f));
     const __m128 nonNegative = _mm_max_ps(scaled, _mm_setzero_ps());
     const __m128 clamped = _mm_min_ps(nonNegative, _mm_set1_ps(255.0f));
+#if defined(__wasm__)
+    // Emscripten emulates CVTTPS2DQ per lane with an lrint() call and range checks; the
+    // input is already clamped to [0, 255] (NaN -> 0), where the saturating wasm
+    // conversion is exact and a single instruction.
+    const __m128i lanes32 = (__m128i)wasm_i32x4_trunc_sat_f32x4((v128_t)clamped);
+#else
     const __m128i lanes32 = _mm_cvttps_epi32(clamped);
+#endif
     const __m128i lanes16 = _mm_packs_epi32(lanes32, lanes32);
     const __m128i lanes8 = _mm_packus_epi16(lanes16, lanes16);
     // Native lane 0 is ps1 and lane 1 is ps0. Packing to the low uint16_t

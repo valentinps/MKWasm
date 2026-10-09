@@ -431,6 +431,22 @@ bool AdvanceDueRetraces(CpuContext* ctx, int maxToProcess, bool serviceAurora)
             if (now < target) {
                 return advancedAny;
             }
+#if defined(__EMSCRIPTEN__)
+            // A long stall (course load, GC pause, background tab) leaves many retraces
+            // overdue. Replaying them back to back runs the guest's retrace callbacks
+            // faster than real time can pass, and the page never yields again. Drop the
+            // backlog instead: the guest sees a late VBlank, as on a lagging console.
+            if (now - target > 4 * g_vi.retraceInterval) {
+                static uint32_t s_droppedBacklogs = 0;
+                if (s_droppedBacklogs < 16 || (s_droppedBacklogs & 255) == 0) {
+                    RT_LOGF(RT_TAG_VI, "dropping %lld overdue retrace(s) (n=%u)\n",
+                            static_cast<long long>((now - target) / g_vi.retraceInterval), s_droppedBacklogs + 1);
+                }
+                ++s_droppedBacklogs;
+                g_vi.lastRetrace = now - g_vi.retraceInterval;
+                target = now;
+            }
+#endif
         }
 
 

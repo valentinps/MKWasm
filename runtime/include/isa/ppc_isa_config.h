@@ -8,6 +8,9 @@
 // wasm builds with -msimd128 -mavx2 -mfma, so Emscripten's SSE/AVX2/FMA headers
 // lower the x86 intrinsic paths onto wasm SIMD128; both share MKW_HOST_X86_SIMD.
 #include <immintrin.h>
+#if defined(__wasm__)
+#include <wasm_simd128.h>
+#endif
 #define MKW_HOST_X86_SIMD 1
 #elif defined(__aarch64__)
 #include <arm_neon.h>
