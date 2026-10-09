@@ -39,6 +39,23 @@ function(_aurora_dawn_set_platform_backends)
   endif ()
 endfunction()
 
+# ── Emscripten: the browser is the WebGPU implementation; emdawnwebgpu supplies the
+# Dawn-flavoured webgpu.h/webgpu_cpp.h headers and JS bindings. ──
+if (EMSCRIPTEN)
+  if (NOT TARGET webgpu_dawn)
+    add_library(webgpu_dawn INTERFACE)
+    target_compile_options(webgpu_dawn INTERFACE --use-port=emdawnwebgpu)
+    target_link_options(webgpu_dawn INTERFACE --use-port=emdawnwebgpu)
+    add_library(dawn::webgpu_dawn ALIAS webgpu_dawn)
+    add_library(dawn::dawncpp_headers ALIAS webgpu_dawn)
+  endif ()
+  foreach (_backend D3D12 D3D11 VULKAN METAL DESKTOP_GL OPENGLES NULL)
+    set(DAWN_ENABLE_${_backend} OFF CACHE INTERNAL "")
+  endforeach ()
+  set(AURORA_DAWN_IS_SHARED FALSE)
+  return()
+endif ()
+
 # ── Auto: resolve provider based on platform availability ──
 set(_aurora_dawn_provider "${AURORA_DAWN_PROVIDER}")
 if (_aurora_dawn_provider STREQUAL "auto")

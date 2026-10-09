@@ -10,7 +10,7 @@ if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
 endif()
 project(mkw_recompiled)
 
-if(NOT CMAKE_CXX_COMPILER_ID MATCHES "^(Clang|AppleClang)$" OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+if(NOT CMAKE_CXX_COMPILER_ID MATCHES "^(Clang|AppleClang)$" OR (NOT CMAKE_SIZEOF_VOID_P EQUAL 8 AND NOT EMSCRIPTEN))
     message(FATAL_ERROR "WiiCompiled requires a 64-bit Clang toolchain")
 endif()
 
@@ -26,7 +26,10 @@ if(APPLE AND CMAKE_OSX_ARCHITECTURES)
     set(CMAKE_SYSTEM_PROCESSOR "${_mkw_osx_arch}")
 endif()
 
-if(WIN32 AND MINGW AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$")
+if(EMSCRIPTEN)
+    # Browser build: wasm32, WebGPU via emdawnwebgpu, guest fibers on JSPI.
+    set(MKW_PLATFORM_WEB TRUE)
+elseif(WIN32 AND MINGW AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$")
     set(MKW_PLATFORM_WINDOWS TRUE)
 elseif(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64|arm64|ARM64)$")
     set(MKW_PLATFORM_MACOS TRUE)
@@ -318,7 +321,15 @@ endif()
 # a registration file is silently never compiled and never errors. The stale-glob
 # failure mode is worth far more than the milliseconds.
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "src/*.cpp")
-if(MKW_PLATFORM_MACOS)
+if(MKW_PLATFORM_WEB)
+    # No VM reservation or fault handling in wasm: guest memory goes through the
+    # checked page-table path, so the web stub replaces both flat-memory backends.
+    list(REMOVE_ITEM SOURCES
+        "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory_macos.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/external_audio_macos.cpp")
+    list(APPEND SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/platform/web/guest_flat_memory_web.cpp")
+elseif(MKW_PLATFORM_MACOS)
     list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory.cpp")
     if(MKW_PLATFORM_MACOS_ARM64)
         # HostContext's Apple Silicon backend is implemented in a small assembly
@@ -372,6 +383,7 @@ if(MKW_BUILD_PSQ_TESTS)
         -P "${CMAKE_CURRENT_LIST_DIR}/tests/psq_reserved_tests.cmake")
 endif()
 
+if(NOT MKW_PLATFORM_WEB)
 add_executable(mkw_platform_paths_tests "${CMAKE_CURRENT_LIST_DIR}/tests/platform_paths_tests.cpp")
 target_link_libraries(mkw_platform_paths_tests PRIVATE mkw_platform)
 target_compile_features(mkw_platform_paths_tests PRIVATE cxx_std_17)
@@ -409,6 +421,7 @@ add_executable(mkw_input_expr_tests
 target_include_directories(mkw_input_expr_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include")
 target_compile_features(mkw_input_expr_tests PRIVATE cxx_std_17)
 add_test(NAME mkw_input_expr_tests COMMAND mkw_input_expr_tests)
+endif()
 
 # HostContext deliberately keeps the platform-specific context primitive out
 # of fiber_manager.cpp. Exercise the Linux libco handoff directly so future

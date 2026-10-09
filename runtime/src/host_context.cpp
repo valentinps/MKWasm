@@ -1,6 +1,18 @@
 #include "host_context.h"
 
-#if defined(_WIN32)
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/emscripten.h>
+#include <emscripten/stack.h>
+
+#include <cstdint>
+#include <cstdlib>
+
+// JSPI stack switching (platform/web/mkw_web.js). The import suspends the calling wasm
+// stack until another fiber switches back to it; a nonzero stackTop starts `target` on a
+// fresh wasm stack whose C shadow stack begins at stackTop.
+extern "C" void mkw_fiber_switch(void* source, void* target, uintptr_t stackTop);
+extern "C" void _emscripten_stack_restore(uintptr_t sp);
+#elif defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -25,7 +37,103 @@ extern "C" void* mkw_co_init(void* stackTop, void (*entry)(void*), void* argumen
 
 namespace HostContext {
 
-#if defined(_WIN32)
+#if defined(__EMSCRIPTEN__)
+
+namespace {
+struct Context {
+    Entry entry = nullptr;
+    void* argument = nullptr;
+    uint8_t* stack = nullptr;       // C shadow stack (null for the scheduler)
+    std::size_t stackSize = 0;
+    bool started = false;
+};
+
+// One host thread; JSPI resumes each fiber's wasm stack, but the C shadow-stack pointer
+// is a single module global that every switch must put back.
+Context* g_current = nullptr;
+} // namespace
+
+extern "C" EMSCRIPTEN_KEEPALIVE void mkw_fiber_trampoline(void* argument)
+{
+    // mkw_web.js has already moved the shadow-stack pointer onto this fiber's stack.
+    auto* context = static_cast<Context*>(argument);
+    g_current = context;
+    context->entry(context->argument);
+    // A guest fiber leaves through FiberProc's scheduler handoff, never by returning.
+    std::abort();
+}
+
+bool InitializeScheduler(Handle* scheduler)
+{
+    auto* context = new Context();
+    context->started = true;
+    g_current = context;
+    *scheduler = context;
+    return true;
+}
+
+void ShutdownScheduler(Handle scheduler)
+{
+    auto* context = static_cast<Context*>(scheduler);
+    if (g_current == context) {
+        g_current = nullptr;
+    }
+    delete context;
+}
+
+Handle Create(std::size_t stackSize, Entry entry, void* argument)
+{
+    auto* context = new Context();
+    context->entry = entry;
+    context->argument = argument;
+    context->stackSize = stackSize < 256 * 1024 ? 256 * 1024 : stackSize;
+    context->stack = static_cast<uint8_t*>(std::aligned_alloc(16, context->stackSize));
+    if (!context->stack) {
+        delete context;
+        return nullptr;
+    }
+    return context;
+}
+
+void Destroy(Handle context)
+{
+    auto* webContext = static_cast<Context*>(context);
+    if (!webContext) {
+        return;
+    }
+    // A started fiber's wasm stack stays parked on its JSPI promise; it is never resumed
+    // again, so releasing its C stack here is safe.
+    std::free(webContext->stack);
+    delete webContext;
+}
+
+bool IsCurrent(Handle context)
+{
+    return context != nullptr && context == g_current;
+}
+
+void Switch(Handle target)
+{
+    auto* destination = static_cast<Context*>(target);
+    Context* source = g_current;
+    if (!destination || destination == source) {
+        return;
+    }
+
+    const uintptr_t savedStackPointer = emscripten_stack_get_current();
+    uintptr_t stackTop = 0;
+    if (!destination->started) {
+        destination->started = true;
+        stackTop = (reinterpret_cast<uintptr_t>(destination->stack) + destination->stackSize) & ~uintptr_t{15};
+    }
+    g_current = destination;
+    mkw_fiber_switch(source, destination, stackTop);
+    // Resumed: other fibers ran on their own shadow stacks in the meantime.
+    _emscripten_stack_restore(savedStackPointer);
+    g_current = source;
+}
+
+#elif defined(_WIN32)
 
 namespace {
 thread_local bool g_convertedScheduler = false;

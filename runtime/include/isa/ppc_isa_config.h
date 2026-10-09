@@ -4,8 +4,11 @@
 #include <cstdint>
 
 #define MKW_RESTRICT __restrict
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__wasm__)
+// wasm builds with -msimd128 -mavx2 -mfma, so Emscripten's SSE/AVX2/FMA headers
+// lower the x86 intrinsic paths onto wasm SIMD128; both share MKW_HOST_X86_SIMD.
 #include <immintrin.h>
+#define MKW_HOST_X86_SIMD 1
 #elif defined(__aarch64__)
 #include <arm_neon.h>
 #else

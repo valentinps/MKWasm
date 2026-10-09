@@ -1,3 +1,6 @@
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/emscripten.h>
+#endif
 #include "common.hpp"
 #include "staging_map.hpp"
 #include "../gx/shader_info.hpp"
@@ -1070,9 +1073,15 @@ static bool begin_frame_impl(bool clearEfb, bool capacityResume = false) {
         ++s_beginFrameMapFailCount;
         return false;
       }
+#if defined(__EMSCRIPTEN__)
+      // Browser map callbacks are delivered from the event loop: suspend (JSPI) until then.
+      emscripten_sleep(0);
+      webgpu::fail_if_device_lost();
+#else
       g_instance.ProcessEvents();
       webgpu::fail_if_device_lost();
       s_mappingState.wait_for_progress();
+#endif
     }
   }
   ++g_stagingEpoch;
@@ -1552,7 +1561,12 @@ static void render_pass_impl(const wgpu::RenderPassEncoder& pass, const std::vec
       // aurora's apply_viewport (lib/gfx/encoding.cpp) exactly.
       const float minDepth = gx::UseReversedZ ? 1.0f - vp.zfar : vp.znear;
       const float maxDepth = gx::UseReversedZ ? 1.0f - vp.znear : vp.zfar;
-      pass.SetViewport(vp.left, vp.top, vp.width, vp.height, minDepth, maxDepth);
+      // Games can push the range past the buffer (MKW sets a GX far plane slightly beyond 1).
+      // Native backends clamp it in hardware; browsers always validate and reject it, so clamp
+      // after the remap, which is where the hardware clamp happens too.
+      const float clampedMax = std::clamp(maxDepth, 0.0f, 1.0f);
+      const float clampedMin = std::clamp(minDepth, 0.0f, clampedMax);
+      pass.SetViewport(vp.left, vp.top, vp.width, vp.height, clampedMin, clampedMax);
     } break;
     case CommandType::SetScissor: {
       const auto& sc = cmd.data.setScissor;

@@ -259,6 +259,11 @@ FrameWorkerState g_frameWorker;
 bool frame_worker_requested() noexcept {
 #ifdef AURORA_ENABLE_GX
   static const bool enabled = [] {
+#if defined(__EMSCRIPTEN__)
+    // WebGPU objects belong to the page's main thread, and the web build has no
+    // pthreads: frame submission stays on the calling thread.
+    return false;
+#endif
 #if defined(__APPLE__)
     // ImGui's SDL backend may raise an SDL window from ImGui::NewFrame(). On
     // macOS that reaches AppKit, whose window operations are main-thread-only;
@@ -1009,7 +1014,12 @@ bool present_presentation_job(const PresentationJob& job) {
           wgpu::Status presentStatus;
           {
             std::lock_guard submitLock(g_queueSubmitMutex);
+#if defined(__EMSCRIPTEN__)
+            // Browsers present the canvas when the frame's task yields; wgpuSurfacePresent aborts.
+            presentStatus = wgpu::Status::Success;
+#else
             presentStatus = g_surface.Present();
+#endif
           }
           presentDuration = std::chrono::duration_cast<std::chrono::nanoseconds>(
               PresentClock::now() - presentStarted);
@@ -1138,6 +1148,14 @@ void wait_for_presenter_idle() noexcept {
 }
 
 void enqueue_presentations(std::vector<PresentationJob>&& jobs) {
+#if defined(__EMSCRIPTEN__)
+  // No presenter thread on the web: the browser composites the canvas once the
+  // frame's JS task yields, so presentation is just the synchronous job.
+  for (auto& job : jobs) {
+    present_presentation_job(job);
+  }
+  return;
+#endif
   ensure_presenter_started();
   // Scale the bound with the group being handed over: a 240 Hz frame enqueues four jobs at once,
   // and a bound sized for two groups blocked the frame worker on a draining one.

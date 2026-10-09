@@ -27,6 +27,9 @@
 #endif
 #include <windows.h>
 #endif
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/emscripten.h>
+#endif
 
 #include <aurora/aurora.h>
 
@@ -165,6 +168,16 @@ void SleepPreciselyUntil(Clock::time_point deadline, bool finishWithSpin = false
     if (now >= deadline) {
         return;
     }
+#if defined(__EMSCRIPTEN__)
+    // The only place the guest's pacing gives the page its event loop back: a JSPI
+    // suspension lets the browser composite the canvas, run timers and deliver input.
+    // Timer granularity is ~1 ms, so the spin window is not reproduced.
+    (void)finishWithSpin;
+    (void)spinWindow;
+    const auto remainingMs = std::chrono::duration<double, std::milli>(deadline - now).count();
+    emscripten_sleep(static_cast<unsigned int>(remainingMs));
+    return;
+#endif
     const auto timerDeadline =
         finishWithSpin && deadline - now > spinWindow ? deadline - spinWindow : deadline;
 #if defined(_WIN32)

@@ -74,3 +74,6 @@ output.txt
 
 # Operating System
 .DS_Store
+
+# Web build output and dev logs
+/web-build/

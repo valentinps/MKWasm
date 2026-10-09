@@ -3,6 +3,9 @@
 #include "runtime_log.h"
 
 #include <algorithm>
+#if defined(__EMSCRIPTEN__)
+#include <sys/time.h>
+#endif
 #include <array>
 #include <chrono>
 #include <cctype>

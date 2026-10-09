@@ -406,6 +406,12 @@ std::string ReadInstalledSetupVersion() {
 }
 
 void InitializeProcessTranscript(int argc, char** argv) {
+#if defined(__EMSCRIPTEN__)
+    // stdout/stderr already reach the page's console; the pipe pumps need host threads.
+    (void)argc;
+    (void)argv;
+    return;
+#endif
     auto& state = GetProcessTranscriptState();
     if (state.initialized.exchange(true, std::memory_order_acq_rel)) {
         return;
@@ -1392,7 +1398,11 @@ int RuntimeMain(int argc, char** argv) {
             const char* configName;
             AuroraBackend backend;
         };
-#if defined(__APPLE__)
+#if defined(__EMSCRIPTEN__)
+        static constexpr std::array<GraphicsBackendEntry, 2> kGraphicsBackends{{
+            {"auto", BACKEND_AUTO}, {"webgpu", BACKEND_WEBGPU},
+        }};
+#elif defined(__APPLE__)
         static constexpr std::array<GraphicsBackendEntry, 2> kGraphicsBackends{{
             {"auto", BACKEND_AUTO}, {"metal", BACKEND_METAL},
         }};

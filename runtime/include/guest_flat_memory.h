@@ -36,6 +36,12 @@ inline constexpr uintptr_t kFixedFlatGuestBase = 0x0000'0080'0000'0000ull;
 // probing to sit far below where the PIE image, heap, shared libraries and
 // stack actually land (all clustered above ~340 GiB on a 39-bit/512 GiB system).
 inline constexpr uintptr_t kFixedFlatGuestBase = 0x0000'0010'0000'0000ull;
+#elif defined(__wasm__)
+// wasm linear memory has no reservations, aliases or protections. Guest accesses
+// resolve through the Memory page tables instead (MKW_GUEST_FLAT_TABLED below);
+// the base is never dereferenced in that mode.
+inline constexpr uintptr_t kFixedFlatGuestBase = 0;
+#define MKW_GUEST_FLAT_TABLED 1
 #else
 #error "guest_flat_memory.h has no fixed flat guest base chosen for this architecture"
 #endif
@@ -73,7 +79,7 @@ bool IsActive();
 // fold this to a compile-time false: it appears in every flat access and must
 // not become a hot-path load. Only AArch64, where the page size is a kernel
 // configuration (4/16/64 KiB), has to probe it at runtime.
-#if defined(_WIN32) || defined(__x86_64__)
+#if defined(_WIN32) || defined(__x86_64__) || defined(__wasm__)
 #define MKW_GUEST_FLAT_FIXED_PAGE_SIZE 1
 #endif
 

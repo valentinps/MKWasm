@@ -18,7 +18,33 @@ if(EXISTS "${GUEST_SYMBOL_TABLE_FILE}")
 else()
     list(APPEND SOURCES "${MKW_RUNTIME_SOURCE_DIR}/cmake/guest_symbol_table_stub.cpp")
 endif()
-if(EXISTS "${DATA_INIT_BLOB_ASM}")
+if(MKW_PLATFORM_WEB AND EXISTS "${DATA_INIT_BLOB_ASM}")
+    # The emitted blob assembly uses COFF section syntax; wasm objects take the same
+    # payloads through #embed instead, generated from the .S so the symbol set matches.
+    file(STRINGS "${DATA_INIT_BLOB_ASM}" MKW_BLOB_LINES REGEX "^(\.globl|\.incbin) ")
+    set(MKW_BLOB_CPP "// AUTO-GENERATED from data_sections_init_blobs.S for the web build.
+#include <cstdint>
+extern \"C\" {
+")
+    foreach(line IN LISTS MKW_BLOB_LINES)
+        if(line MATCHES "^\.globl ([A-Za-z0-9_]+)")
+            set(MKW_BLOB_SYMBOL "${CMAKE_MATCH_1}")
+        elseif(line MATCHES "^\.incbin \"([^\"]+)\"")
+            string(APPEND MKW_BLOB_CPP
+                "alignas(16) extern const uint8_t ${MKW_BLOB_SYMBOL}[] = {
+#embed \"${CMAKE_MATCH_1}\"
+};
+")
+        endif()
+    endforeach()
+    string(APPEND MKW_BLOB_CPP "}
+")
+    set(MKW_BLOB_CPP_FILE "${CMAKE_BINARY_DIR}/generated_web/data_sections_init_blobs.cpp")
+    file(CONFIGURE OUTPUT "${MKW_BLOB_CPP_FILE}" CONTENT "${MKW_BLOB_CPP}" @ONLY)
+    set_source_files_properties("${MKW_BLOB_CPP_FILE}" PROPERTIES
+        SKIP_UNITY_BUILD_INCLUSION ON SKIP_PRECOMPILE_HEADERS ON COMPILE_OPTIONS "-Wno-c23-extensions")
+    list(APPEND SOURCES "${MKW_BLOB_CPP_FILE}")
+elseif(EXISTS "${DATA_INIT_BLOB_ASM}")
     enable_language(ASM)
     set_source_files_properties("${DATA_INIT_BLOB_ASM}" PROPERTIES LANGUAGE ASM SKIP_UNITY_BUILD_INCLUSION ON)
     list(APPEND SOURCES "${DATA_INIT_BLOB_ASM}")
@@ -226,6 +252,23 @@ function(mkw_configure_product target)
             $<TARGET_FILE:sqlite3> $<TARGET_FILE_DIR:${target}>)
     endif()
 
+    if(MKW_PLATFORM_WEB)
+        target_link_options(${target} PRIVATE
+            -sJSPI=1
+            -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=512MB -sMAXIMUM_MEMORY=4GB
+            -sSTACK_SIZE=8MB -sENVIRONMENT=web
+            -sEXPORT_EXCEPTION_HANDLING_HELPERS=1 -sEXCEPTION_STACK_TRACES=1
+            -sEXPORTED_RUNTIME_METHODS=FS,ENV,callMain,addRunDependency,removeRunDependency
+            "--js-library=${MKW_RUNTIME_SOURCE_DIR}/src/platform/web/mkw_web.js"
+            # Runtime-owned assets only (no game data): the files the native build copies
+            # next to the executable. SDL_GetBasePath() is "/" on the web, where Aurora
+            # looks for its initial pipeline cache.
+            "--preload-file=${MKW_RUNTIME_SOURCE_DIR}/assets/dsp/dsp_coef.bin@/app/dsp_coef.bin"
+            "--preload-file=${MKW_RUNTIME_SOURCE_DIR}/assets/wii@/app/wii_bootstrap"
+            "--preload-file=${MKW_RUNTIME_SOURCE_DIR}/assets/certs/cacert.pem@/app/cacert.pem"
+            "--preload-file=${MKW_RUNTIME_SOURCE_DIR}/assets/pipeline/initial_pipeline_cache.db@/initial_pipeline_cache.db")
+        set_target_properties(${target} PROPERTIES SUFFIX ".js")
+    endif()
     if(MKW_PLATFORM_WINDOWS)
         target_link_libraries(${target} PRIVATE
             dbghelp user32 winmm ws2_32 iphlpapi secur32 crypt32 windowsapp)

@@ -284,6 +284,13 @@ inline constexpr const char* Describe(HostReadFailure failure) noexcept {
     return "unknown host read error";
 }
 
+#if defined(__EMSCRIPTEN__)
+// Web build: game files are not in the module's filesystem. platform/web/mkw_web.js serves
+// the range asynchronously (JSPI-suspending) and returns the byte count, or -1 for a missing
+// file and -2 for an offset at or past the end of the file.
+extern "C" int32_t mkw_web_read_file(const char* hostPath, double offset, uint32_t length, uint8_t* destination);
+#endif
+
 // Read into private storage first and publish it only after the complete host
 // range has been obtained. Callers can therefore leave a guest DMA destination
 // untouched for every failure, including a host file truncated after indexing.
@@ -293,6 +300,26 @@ inline bool ReadExact(const std::filesystem::path& hostPath,
                       std::vector<uint8_t>& destination,
                       HostReadFailure& failure) {
     failure = HostReadFailure::None;
+
+#if defined(__EMSCRIPTEN__)
+    std::vector<uint8_t> webStaged(length);
+    const int32_t webRead = mkw_web_read_file(hostPath.generic_string().c_str(),
+                                              static_cast<double>(offset), length, webStaged.data());
+    if (webRead == -1) {
+        failure = HostReadFailure::MissingFile;
+        return false;
+    }
+    if (webRead < 0) {
+        failure = HostReadFailure::BadOffset;
+        return false;
+    }
+    if (static_cast<uint32_t>(webRead) != length) {
+        failure = HostReadFailure::ShortRead;
+        return false;
+    }
+    destination = std::move(webStaged);
+    return true;
+#endif
 
     std::ifstream file(hostPath, std::ios::binary);
     if (!file.is_open()) {

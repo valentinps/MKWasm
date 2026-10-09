@@ -12,7 +12,7 @@
 // CpuContextScope), making per-op flushes free. Accepted deviations (same trade Dolphin makes):
 // flush-to-zero also flushes double denormals unlike real NI, and a pre-round-flush edge near
 // FLT_MIN rounds via cvtsd2ss (or its AArch64 equivalent) instead.
-#if defined(__x86_64__)
+#if defined(MKW_HOST_X86_SIMD)
 // MXCSR: FTZ (bit 15, flushes arithmetic *output* denormals) and DAZ (bit 6, treats denormal
 // *inputs* as zero) are two separate bits on x86; both are set/cleared together here.
 inline constexpr uint32_t kMkwFpControlFlushToZeroBits = (1u << 15) | (1u << 6); // FTZ | DAZ
@@ -36,9 +36,18 @@ inline thread_local double g_mkwNiFlushThreshold = 0.0;
 // Host FP control register access (MXCSR on x86_64, FPCR on AArch64), abstracted so
 // MkwApplyHostNiMode/MkwRestoreHostMxcsr and CpuContextScope (ppc_isa_context.h) don't each need
 // their own per-arch branch.
+#if defined(__wasm__)
+// wasm has no FP control register and never flushes denormals, so the "register" is a
+// per-thread variable: the NI mirror stays coherent, but FPSCR[NI] arithmetic flushing is
+// not reproduced on this host (PpcForceSingleValueInline's explicit flush still applies).
+inline thread_local uint32_t g_mkwWasmFpControl = 0x1F80u;  // MXCSR power-on value
+#endif
+
 inline uint32_t MkwGetHostFpControl() noexcept
 {
-#if defined(__x86_64__)
+#if defined(__wasm__)
+    return g_mkwWasmFpControl;
+#elif defined(__x86_64__)
     return _mm_getcsr();
 #elif defined(__aarch64__)
     uint64_t fpcr = 0;
@@ -49,7 +58,9 @@ inline uint32_t MkwGetHostFpControl() noexcept
 
 inline void MkwSetHostFpControl(uint32_t value) noexcept
 {
-#if defined(__x86_64__)
+#if defined(__wasm__)
+    g_mkwWasmFpControl = value;
+#elif defined(__x86_64__)
     _mm_setcsr(value);
 #elif defined(__aarch64__)
     // Read-modify-write the full 64-bit FPCR: only the low 32 bits are architecturally defined

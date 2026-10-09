@@ -238,10 +238,16 @@ MKW_MEMORY_FORCE_INLINE uint8_t* ResolveRangeHost(uint32_t base, int32_t minOffs
         (void)needsWrite;
         return nullptr;
     }
+#if defined(MKW_GUEST_FLAT_TABLED)
+    // No contiguous guest view: ranges take the per-access resolved path.
+    (void)needsWrite;
+    return nullptr;
+#else
     if (needsWrite &&
         (FlatWriteNeedsPolicy(guestStart) || FlatWriteNeedsPolicy(guestStart + (length - 1))))
         [[unlikely]] return nullptr;
     return MKW_FLAT_GUEST_BASE + guestStart;
+#endif
 }
 
 // Guest-address byte order. Distinct from isa/big_endian.h, which is the
@@ -537,6 +543,49 @@ MKW_MEMORY_FORCE_INLINE void WriteResolvedFloat64(uint8_t* r, uint32_t o, uint32
 // FlatWriteRam* remains direct because the translator emits it only for
 // addresses it has proven are ordinary RAM.
 
+#if defined(MKW_GUEST_FLAT_TABLED)
+// Tabled form (wasm): one bias-table load replaces the flat base. Pages the
+// tables leave empty (MMIO, deferred EFB reads, executable pages, small
+// mappings) fall back to the checked Memory::* path, which applies the same
+// policies the native build gets from page protections.
+template <typename T>
+MKW_MEMORY_NO_INLINE MKW_MEMORY_COLD T FlatLoadChecked(uint32_t address) {
+    if constexpr (sizeof(T) == 1) return static_cast<T>(Memory::Read8(address));
+    else if constexpr (sizeof(T) == 2) return static_cast<T>(Memory::Read16(address));
+    else if constexpr (sizeof(T) == 4) return static_cast<T>(Memory::Read32(address));
+    else return static_cast<T>(Memory::Read64(address));
+}
+
+template <typename T>
+MKW_MEMORY_NO_INLINE MKW_MEMORY_COLD void FlatStoreChecked(uint32_t address, T value) {
+    if constexpr (sizeof(T) == 1) Memory::Write8(address, static_cast<uint8_t>(value));
+    else if constexpr (sizeof(T) == 2) Memory::Write16(address, static_cast<uint16_t>(value));
+    else if constexpr (sizeof(T) == 4) Memory::Write32(address, static_cast<uint32_t>(value));
+    else Memory::Write64(address, static_cast<uint64_t>(value));
+}
+
+template <typename T>
+MKW_MEMORY_FORCE_INLINE T FlatLoad(uint32_t address) {
+    const uintptr_t encodedBias = g_fullReadablePageBias[address >> kPageShift];
+    if (encodedBias != 0) [[likely]] {
+        T value{};
+        std::memcpy(&value, reinterpret_cast<const uint8_t*>((encodedBias - 1u) + address), sizeof(T));
+        return MaybeByteSwap(value);
+    }
+    return FlatLoadChecked<T>(address);
+}
+
+template <typename T>
+MKW_MEMORY_FORCE_INLINE void FlatStore(uint32_t address, T value) {
+    uint8_t* host = nullptr;
+    if (TryGetWritablePointerFast(address, sizeof(T), host)) [[likely]] {
+        const T swapped = MaybeByteSwap(value);
+        std::memcpy(host, &swapped, sizeof(T));
+        return;
+    }
+    FlatStoreChecked<T>(address, value);
+}
+#else
 template <typename T>
 MKW_MEMORY_FORCE_INLINE T FlatLoad(uint32_t address) {
     T value{};
@@ -549,6 +598,7 @@ MKW_MEMORY_FORCE_INLINE void FlatStore(uint32_t address, T value) {
     const T swapped = MaybeByteSwap(value);
     std::memcpy(MKW_FLAT_GUEST_BASE + address, &swapped, sizeof(T));
 }
+#endif
 
 MKW_MEMORY_FORCE_INLINE uint8_t FlatRead8(uint32_t address) {
     if (GuestFlat::RequiresCheckedAccess()) return Memory::Read8(address);

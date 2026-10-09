@@ -39,7 +39,7 @@ inline uint32_t PpcStorePsqFloatBitsInline(uint32_t value)
 
 inline uint64_t PpcLoadPairPsqFloatBitsPackedInline(uint64_t value)
 {
-#if defined(__x86_64__)
+#if defined(MKW_HOST_X86_SIMD)
     const __m128i lanes = _mm_cvtsi64_si128(static_cast<long long>(value));
     const __m128i magnitude = _mm_and_si128(lanes, _mm_set1_epi32(0x7FFFFFFF));
     const __m128i nanMask = _mm_cmpgt_epi32(magnitude, _mm_set1_epi32(0x7F800000));
@@ -58,7 +58,7 @@ inline uint64_t PpcLoadPairPsqFloatBitsPackedInline(uint64_t value)
 
 inline uint64_t PpcStorePairPsqFloatBitsPackedInline(uint64_t value)
 {
-#if defined(__x86_64__)
+#if defined(MKW_HOST_X86_SIMD)
     const __m128i lanes = _mm_cvtsi64_si128(static_cast<long long>(value));
     const __m128i magnitude = _mm_and_si128(lanes, _mm_set1_epi32(0x7FFFFFFF));
     const __m128i subnormalMask = _mm_cmplt_epi32(magnitude, _mm_set1_epi32(0x00800000));
@@ -80,7 +80,7 @@ inline uint64_t PpcStorePairPsqFloatBitsPackedInline(uint64_t value)
 #endif
 }
 
-#if defined(__x86_64__)
+#if defined(MKW_HOST_X86_SIMD)
 inline __m128i PpcPsqSwapPairBytesInline(__m128i lanes)
 {
     const __m128i order = _mm_setr_epi8(
@@ -114,12 +114,12 @@ inline __m128i PpcStorePairPsqFloatBitsLanesInline(__m128i lanes)
         _mm_and_si128(subnormalMask, signedZero),
         _mm_andnot_si128(subnormalMask, quieted));
 }
-#endif // defined(__x86_64__)
+#endif // defined(MKW_HOST_X86_SIMD)
 
 // host -> packed FPR double, guard already proven by the caller.
 inline double PpcLoadPairPsqFloatFromHostInline(const uint8_t* host)
 {
-#if defined(__x86_64__)
+#if defined(MKW_HOST_X86_SIMD)
     const __m128i raw = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(host));
     return PpcM128ToPsInline(_mm_castsi128_ps(
         PpcLoadPairPsqFloatBitsLanesInline(PpcPsqSwapPairBytesInline(raw))));
@@ -139,7 +139,7 @@ inline double PpcLoadPairPsqFloatFromHostInline(const uint8_t* host)
 // packed FPR double -> host, guard already proven by the caller.
 inline void PpcStorePairPsqFloatToHostInline(uint8_t* host, double value)
 {
-#if defined(__x86_64__)
+#if defined(MKW_HOST_X86_SIMD)
     const __m128i lanes = PpcStorePairPsqFloatBitsLanesInline(
         _mm_castps_si128(PpcPsToM128Inline(value)));
     _mm_storel_epi64(reinterpret_cast<__m128i*>(host), PpcPsqSwapPairBytesInline(lanes));
@@ -266,7 +266,12 @@ MKW_PPC_FORCE_INLINE const uint8_t* PpcTryGetPsqReadableHostInline(uint32_t addr
 {
     if (GuestFlat::RequiresCheckedAccess()) [[unlikely]]
         return nullptr;
+#if defined(MKW_GUEST_FLAT_TABLED)
+    const uintptr_t encodedBias = MemoryInline::g_fullReadablePageBias[addr >> MemoryInline::kPageShift];
+    return encodedBias != 0 ? reinterpret_cast<const uint8_t*>((encodedBias - 1u) + addr) : nullptr;
+#else
     return MKW_FLAT_GUEST_BASE + addr;
+#endif
 }
 
 // Same reduction for stores. Still refuses a 32-bit address wrap (one host access can't
@@ -280,10 +285,15 @@ MKW_PPC_FORCE_INLINE uint8_t* PpcTryGetPsqWritableHostInline(uint32_t addr)
         return nullptr;
     if (addr > UINT32_MAX - 7u) [[unlikely]]
         return nullptr;
+#if defined(MKW_GUEST_FLAT_TABLED)
+    uint8_t* host = nullptr;
+    return MemoryInline::TryGetWritablePointerFast(addr, 8, host) ? host : nullptr;
+#else
     if (MemoryInline::FlatWriteNeedsPolicy(addr) ||
         MemoryInline::FlatWriteNeedsPolicy(addr + 7u)) [[unlikely]]
         return nullptr;
     return MKW_FLAT_GUEST_BASE + addr;
+#endif
 }
 
 inline double PpcLoadPairPsqFloatFastInline(uint32_t addr)
@@ -373,7 +383,7 @@ inline uint8_t PpcQuantizePsqU8Scale61Inline(float value)
 // matching PpcQuantizePsqU8Scale61Inline's !(scaled > 0) rule.
 inline uint16_t PpcQuantizePairPsqU8Scale61PackedInline(double value)
 {
-#if defined(__x86_64__)
+#if defined(MKW_HOST_X86_SIMD)
     const __m128 scaled = _mm_mul_ps(PpcPsToM128Inline(value), _mm_set1_ps(0.125f));
     const __m128 nonNegative = _mm_max_ps(scaled, _mm_setzero_ps());
     const __m128 clamped = _mm_min_ps(nonNegative, _mm_set1_ps(255.0f));

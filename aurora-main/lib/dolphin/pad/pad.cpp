@@ -277,6 +277,45 @@ struct PADKeyboardState {
 
 std::array<PADKeyboardState, PAD_MAX_CONTROLLERS> g_keyboardBindings;
 
+#if defined(__EMSCRIPTEN__)
+// Browser players often have no gamepad paired yet, so port 1 falls back to this layout while
+// nothing else drives it (no gamepad assigned and no saved keyboard bindings):
+//   arrows = control stick, X = A (accelerate), Z = B (brake), Space = R (drift),
+//   Q = L (item), E = Z, C = X, V = Y, Enter = Start, T/G/F/H = D-pad.
+static PADKeyboardState make_web_keyboard_defaults() {
+  PADKeyboardState state;
+  state.m_buttonMapping = {{
+      {SDL_SCANCODE_X, PAD_BUTTON_A},
+      {SDL_SCANCODE_Z, PAD_BUTTON_B},
+      {SDL_SCANCODE_C, PAD_BUTTON_X},
+      {SDL_SCANCODE_V, PAD_BUTTON_Y},
+      {SDL_SCANCODE_RETURN, PAD_BUTTON_START},
+      {SDL_SCANCODE_E, PAD_TRIGGER_Z},
+      {SDL_SCANCODE_Q, PAD_TRIGGER_L},
+      {SDL_SCANCODE_SPACE, PAD_TRIGGER_R},
+      {SDL_SCANCODE_T, PAD_BUTTON_UP},
+      {SDL_SCANCODE_G, PAD_BUTTON_DOWN},
+      {SDL_SCANCODE_F, PAD_BUTTON_LEFT},
+      {SDL_SCANCODE_H, PAD_BUTTON_RIGHT},
+  }};
+  state.m_axisMapping = {{
+      {SDL_SCANCODE_RIGHT, PAD_AXIS_LEFT_X_POS, 0},
+      {SDL_SCANCODE_LEFT, PAD_AXIS_LEFT_X_NEG, 0},
+      {SDL_SCANCODE_UP, PAD_AXIS_LEFT_Y_POS, 0},
+      {SDL_SCANCODE_DOWN, PAD_AXIS_LEFT_Y_NEG, 0},
+      {PAD_KEY_INVALID, PAD_AXIS_RIGHT_X_POS, 0},
+      {PAD_KEY_INVALID, PAD_AXIS_RIGHT_X_NEG, 0},
+      {PAD_KEY_INVALID, PAD_AXIS_RIGHT_Y_POS, 0},
+      {PAD_KEY_INVALID, PAD_AXIS_RIGHT_Y_NEG, 0},
+      {SDL_SCANCODE_Q, PAD_AXIS_TRIGGER_L, 0},
+      {SDL_SCANCODE_SPACE, PAD_AXIS_TRIGGER_R, 0},
+  }};
+  state.m_mappingsSet = true;
+  return state;
+}
+static const PADKeyboardState g_webKeyboardDefaults = make_web_keyboard_defaults();
+#endif
+
 struct PADCLampRegion {
   uint8_t minTrigger;
   uint8_t maxTrigger;
@@ -728,7 +767,13 @@ u32 PADRead(PADStatus* status) {
   for (uint32_t i = 0; i < PAD_CHANMAX; ++i) {
     memset(&status[i], 0, sizeof(PADStatus));
     auto controller = aurora::input::get_controller_for_player(i);
-    if (controller == nullptr && !g_keyboardBindings[i].m_mappingsSet) {
+    const PADKeyboardState* keyboard = &g_keyboardBindings[i];
+#if defined(__EMSCRIPTEN__)
+    if (i == 0 && controller == nullptr && !keyboard->m_mappingsSet) {
+      keyboard = &g_webKeyboardDefaults;
+    }
+#endif
+    if (controller == nullptr && !keyboard->m_mappingsSet) {
       status[i].err = PAD_ERR_NO_CONTROLLER;
       g_suppressedButtons[i] = 0;
       g_suppressLeftTrigger[i] = false;
@@ -737,8 +782,8 @@ u32 PADRead(PADStatus* status) {
     }
 
     status[i].err = PAD_ERR_NONE;
-    if (g_keyboardBindings[i].m_mappingsSet && SDL_GetKeyboardFocus() != nullptr) {
-      std::for_each(g_keyboardBindings[i].m_buttonMapping.begin(), g_keyboardBindings[i].m_buttonMapping.end(),
+    if (keyboard->m_mappingsSet && SDL_GetKeyboardFocus() != nullptr) {
+      std::for_each(keyboard->m_buttonMapping.begin(), keyboard->m_buttonMapping.end(),
                     [&kbState, &numKeys, &i, &status](const PADKeyButtonBinding& mapping) {
             if (mapping.scancode > PAD_KEY_INVALID && mapping.scancode < numKeys && kbState[mapping.scancode]) {
               status[i].button |= mapping.padButton;
@@ -748,7 +793,7 @@ u32 PADRead(PADStatus* status) {
           });
 
       int lx = 0, ly = 0, rx = 0, ry = 0, tl = 0, tr = 0;
-      for (const auto& binding : g_keyboardBindings[i].m_axisMapping) {
+      for (const auto& binding : keyboard->m_axisMapping) {
         bool pressed = false;
         if (binding.scancode > PAD_KEY_INVALID) {
           pressed = binding.scancode < numKeys && kbState[binding.scancode];

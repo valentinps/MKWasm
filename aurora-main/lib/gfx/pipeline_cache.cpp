@@ -360,6 +360,12 @@ static PipelineCacheWrite make_pipeline_cache_write(ShaderType type, PipelineRef
 }
 
 static void enqueue_pipeline_cache_write(PipelineCacheWrite write) {
+#if defined(__EMSCRIPTEN__)
+  // No writer thread on the web, and the database lives in MEMFS where it would not
+  // outlive the page anyway; recipes are still read from the seeded cache.
+  (void)write;
+  return;
+#endif
   if (g_pipelineCacheBroken || g_pipelineCacheDb == nullptr) {
     return;
   }
@@ -1128,6 +1134,9 @@ static void load_pipeline_cache() {
 }
 
 static void start_pipeline_cache_writer() {
+#if defined(__EMSCRIPTEN__)
+  return;
+#endif
   if (!prepare_pipeline_cache_db()) {
     return;
   }

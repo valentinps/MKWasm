@@ -46,6 +46,8 @@ std::optional<std::filesystem::path> ExecutableDirectory() noexcept {
     std::error_code ec;
     const auto resolved = std::filesystem::weakly_canonical(path, ec);
     return (ec ? std::filesystem::path(path) : resolved).parent_path();
+#elif defined(__EMSCRIPTEN__)
+    return std::filesystem::path("/app");
 #else
     return std::nullopt;
 #endif

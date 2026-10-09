@@ -370,6 +370,11 @@ bool create_window(AuroraBackend backend) {
   flags |= SDL_WINDOW_FULLSCREEN;
 #else
   flags |= SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE;
+#if defined(__EMSCRIPTEN__)
+  // The page is the window: SDL sizes the canvas (and its devicePixelRatio backing store) to
+  // the document and reports resizes like a desktop window resize.
+  flags |= SDL_WINDOW_FILL_DOCUMENT;
+#endif
   if (g_config.startFullscreen) {
     flags |= SDL_WINDOW_FULLSCREEN;
   }

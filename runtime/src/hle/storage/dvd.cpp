@@ -809,11 +809,21 @@ extern "C" void DVDInit_8015EA1C()
     // 4. Scan Files
     const fs::path& rootPath = GetDvdRoot();
     
+#if defined(__EMSCRIPTEN__)
+    // Web: the extracted files are served over HTTP, not present in the module's
+    // filesystem, so the disc's own FST is the index (every entry is a real disc file).
+    (void)rootPath;
+    LoadFstIndex();
+    for (const FstFileEntry& fstFile : g_fstFiles) {
+        RegisterFileEntry(fstFile.dvdPath, fstFile.hostPath, fstFile.size);
+    }
+#else
     // Map "<dvd_root>/files" -> "/"
     ScanDirectory(rootPath / "files", "/");
 
     // Map "<dvd_root>/sys" -> "/sys/" (e.g. main.dol, bi2.bin)
     ScanDirectory(rootPath / "sys", "/sys/");
+#endif
 
     const auto& overlays = RuntimeRiivolution::Overlays();
     if (overlays.empty() && RuntimeProduct::IsRetroRewind()) {

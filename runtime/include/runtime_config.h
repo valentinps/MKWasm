@@ -168,7 +168,9 @@ inline bool IsSupportedResolutionMultiplier(float value) {
 // Must stay in step with the backend table in main.cpp, which is what actually
 // maps these to AuroraBackend.
 inline bool IsSupportedGraphicsApi(std::string_view value) {
-#if defined(__APPLE__)
+#if defined(__EMSCRIPTEN__)
+    static constexpr std::array<std::string_view, 2> values{"auto", "webgpu"};
+#elif defined(__APPLE__)
     static constexpr std::array<std::string_view, 2> values{"auto", "metal"};
 // only vulkan for linux
 #elif defined(__linux__)
@@ -208,6 +210,9 @@ inline std::optional<std::filesystem::path> ExecutableDirectory() {
     }
 #elif defined(__APPLE__)
     return RuntimePlatform::ExecutableDirectory();
+#elif defined(__EMSCRIPTEN__)
+    // The runtime's bundled assets are preloaded here (cmake/PublicProducts.cmake).
+    return std::filesystem::path("/app");
 #else
     // /proc/self/exe is a Linux-specific magic symlink to the running executable; readlink()
     // does not NUL-terminate and silently truncates if the buffer is too small, so this grows

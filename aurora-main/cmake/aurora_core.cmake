@@ -31,8 +31,16 @@ if (AURORA_ENABLE_GX)
 endif ()
 
 if (AURORA_ENABLE_GX)
-    target_compile_definitions(aurora_core PUBLIC AURORA_ENABLE_GX WEBGPU_DAWN)
-    target_sources(aurora_core PRIVATE lib/webgpu/gpu.cpp lib/webgpu/gpu_cache.cpp lib/dawn/BackendBinding.cpp)
+    if (EMSCRIPTEN)
+        # The browser is the WebGPU implementation (emdawnwebgpu): no Dawn native API,
+        # toggles or platform surface bindings.
+        target_compile_definitions(aurora_core PUBLIC AURORA_ENABLE_GX)
+        target_compile_definitions(aurora_core PRIVATE ENABLE_BACKEND_WEBGPU)
+        target_sources(aurora_core PRIVATE lib/webgpu/gpu.cpp lib/webgpu/gpu_cache.cpp)
+    else ()
+        target_compile_definitions(aurora_core PUBLIC AURORA_ENABLE_GX WEBGPU_DAWN)
+        target_sources(aurora_core PRIVATE lib/webgpu/gpu.cpp lib/webgpu/gpu_cache.cpp lib/dawn/BackendBinding.cpp)
+    endif ()
     target_link_libraries(aurora_core PRIVATE dawn::webgpu_dawn)
     if (APPLE AND DAWN_ENABLE_METAL)
         find_library(AURORA_METALFX_FRAMEWORK MetalFX)

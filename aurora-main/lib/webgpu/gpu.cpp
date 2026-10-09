@@ -495,6 +495,15 @@ static wgpu::BackendType to_wgpu_backend(AuroraBackend backend) {
 }
 
 static bool create_surface() {
+#if defined(__EMSCRIPTEN__)
+  // SDL3's Emscripten video driver renders into Module.canvas, which the page gives id "canvas".
+  wgpu::EmscriptenSurfaceSourceCanvasHTMLSelector canvasSource{};
+  canvasSource.selector = "#canvas";
+  const wgpu::SurfaceDescriptor surfaceDescriptor{
+      .nextInChain = &canvasSource,
+      .label = "Surface",
+  };
+#else
   SDL_Window* window = window::get_sdl_window();
   if (window == nullptr) {
     Log.error("Failed to create surface: no window");
@@ -509,6 +518,7 @@ static bool create_surface() {
       .nextInChain = chainedDescriptor.get(),
       .label = "Surface",
   };
+#endif
   release_surface();
   g_surface = g_instance.CreateSurface(&surfaceDescriptor);
   if (!g_surface) {
@@ -644,12 +654,14 @@ bool initialize(AuroraBackend auroraBackend) {
     std::vector<wgpu::FeatureName> requiredFeatures;
     // Optional native sharing for MetalFX. Devices without either feature keep
     // the normal renderer; the upscaler checks the enabled pair at runtime.
+#ifdef WEBGPU_DAWN
     if (backend == wgpu::BackendType::Metal &&
         g_adapter.HasFeature(wgpu::FeatureName::SharedTextureMemoryIOSurface) &&
         g_adapter.HasFeature(wgpu::FeatureName::SharedFenceMTLSharedEvent)) {
       requiredFeatures.push_back(wgpu::FeatureName::SharedTextureMemoryIOSurface);
       requiredFeatures.push_back(wgpu::FeatureName::SharedFenceMTLSharedEvent);
     }
+#endif
     bool implicitDeviceSynchronizationSupported = false;
     wgpu::SupportedFeatures supportedFeatures;
     g_adapter.GetFeatures(&supportedFeatures);
@@ -661,10 +673,15 @@ bool initialize(AuroraBackend auroraBackend) {
       }
       // The presenter calls device and queue methods while the frame worker encodes, which Dawn only
       // supports with this feature; without it the two race inside the device's dynamic uploader.
+#ifdef WEBGPU_DAWN
       if (feature == wgpu::FeatureName::ImplicitDeviceSynchronization) {
         implicitDeviceSynchronizationSupported = true;
         requiredFeatures.push_back(feature);
       }
+#else
+      // Single-threaded on the web: nothing to synchronize.
+      implicitDeviceSynchronizationSupported = true;
+#endif
     }
     if (!implicitDeviceSynchronizationSupported) {
       Log.warn(
@@ -716,6 +733,19 @@ bool initialize(AuroraBackend auroraBackend) {
     deviceDescriptor.requiredLimits = &requiredLimits;
     deviceDescriptor.SetUncapturedErrorCallback(
         [](const wgpu::Device& device, wgpu::ErrorType type, wgpu::StringView message) {
+#if defined(__EMSCRIPTEN__)
+          // Native builds run Dawn with skip_validation, so invalid-but-harmless usage never
+          // surfaces there. Browsers always validate; losing one frame beats ending the game.
+          if (g_initialized.load(std::memory_order_acquire)) {
+            static uint32_t s_webValidationErrors = 0;
+            if (s_webValidationErrors < 32 || (s_webValidationErrors & 1023) == 0) {
+              Log.error("WebGPU error {} (frame dropped, n={}): {}", underlying(type), s_webValidationErrors + 1,
+                        message);
+            }
+            ++s_webValidationErrors;
+            return;
+          }
+#endif
           if (g_initialized.load(std::memory_order_acquire)) {
             FATAL("WebGPU error {}: {}", underlying(type), message);
           } else {
@@ -764,6 +794,7 @@ bool initialize(AuroraBackend auroraBackend) {
     if (!g_device) {
       return false;
     }
+#ifdef WEBGPU_DAWN
     g_device.SetLoggingCallback([](wgpu::LoggingType type, wgpu::StringView message) {
       AuroraLogLevel level = LOG_FATAL;
       switch (type) {
@@ -784,6 +815,7 @@ bool initialize(AuroraBackend auroraBackend) {
       }
       Log.report(level, "WebGPU message: {}", message);
     });
+#endif
   }
   g_queue = g_device.GetQueue();
 
