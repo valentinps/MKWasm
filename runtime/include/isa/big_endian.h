@@ -5,18 +5,20 @@
 #include <cstring>
 #include <type_traits>
 
+#include "isa/host_byteswap.h"
+
 namespace BigEndian {
 
 inline uint16_t Read16(const uint8_t* src) {
-    return (static_cast<uint16_t>(src[0]) << 8) |
-           static_cast<uint16_t>(src[1]);
+    uint16_t value = 0;
+    std::memcpy(&value, src, sizeof(value));
+    return MkwByteSwap16(value);
 }
 
 inline uint32_t Read32(const uint8_t* src) {
-    return (static_cast<uint32_t>(src[0]) << 24) |
-           (static_cast<uint32_t>(src[1]) << 16) |
-           (static_cast<uint32_t>(src[2]) << 8) |
-           static_cast<uint32_t>(src[3]);
+    uint32_t value = 0;
+    std::memcpy(&value, src, sizeof(value));
+    return MkwByteSwap32(value);
 }
 
 inline float ReadFloat32(const uint8_t* src) {
@@ -28,15 +30,13 @@ inline float ReadFloat32(const uint8_t* src) {
 }
 
 inline void Write16(uint8_t* dst, uint16_t value) {
-    dst[0] = static_cast<uint8_t>(value >> 8);
-    dst[1] = static_cast<uint8_t>(value);
+    const uint16_t swapped = MkwByteSwap16(value);
+    std::memcpy(dst, &swapped, sizeof(swapped));
 }
 
 inline void Write32(uint8_t* dst, uint32_t value) {
-    dst[0] = static_cast<uint8_t>(value >> 24);
-    dst[1] = static_cast<uint8_t>(value >> 16);
-    dst[2] = static_cast<uint8_t>(value >> 8);
-    dst[3] = static_cast<uint8_t>(value);
+    const uint32_t swapped = MkwByteSwap32(value);
+    std::memcpy(dst, &swapped, sizeof(swapped));
 }
 
 inline void Write64(uint8_t* dst, uint64_t value) {

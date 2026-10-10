@@ -1,6 +1,7 @@
 // Interrupt masking/dispatch plus the EXI/IPC hardware stubs that hang off it.
 
 #include "platform/web_watchdog.h"
+#include "platform/web_slices.h"
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -50,6 +51,45 @@ inline void UpdateCurrentContextInterruptFlag(bool enabled)
 }
 } // namespace
 
+#if defined(__EMSCRIPTEN__)
+namespace {
+// Interrupt delivery during long guest slices. Guest threads only reach the scheduler, whose
+// idle loop delivers VBlank, alarms and audio DMA, when they block; a thread that computes for
+// hundreds of milliseconds (scene construction at race start) would otherwise starve audio
+// output for that long. On hardware those interrupts are taken the moment the thread enables
+// interrupts again, so that is where they are delivered here, on a private register file and
+// with rescheduling deferred, exactly like the GX and Aurora wait paths do.
+void MkwWebServiceInterruptsInLongSlice() noexcept
+{
+    static uint32_t s_calls = 0;
+    if ((++s_calls & 15u) != 0 || MkwWebSlices::s_sliceThread == 0) {
+        return; // the idle loop (thread 0) services interrupts itself
+    }
+    static bool s_active = false;
+    static double s_lastService = 0.0;
+    if (s_active || VI_HLE_IsAdvancingRetrace()) {
+        return;
+    }
+    const double now = emscripten_get_now();
+    if (now - MkwWebSlices::s_sliceStart < 12.0 || now - s_lastService < 2.0) {
+        return;
+    }
+    s_lastService = now;
+    ++g_mkwWebIrqServices;
+    s_active = true;
+    try {
+        VI_HLE_ProcessRetracesWhileGuestBusy(8);
+        OS_HLE_ProcessAlarmsDeferred(8);
+        Audio_HLE_PollDeferred();
+    } catch (...) {
+        s_active = false;
+        throw;
+    }
+    s_active = false;
+}
+} // namespace
+#endif
+
 // Minimal, host-side replacements for early OS interrupt/exception helpers.
 extern "C" int32_t OS__DisableInterrupts_801a65ac()
 {
@@ -63,6 +103,11 @@ extern "C" int32_t OS__RestoreInterrupts_801a65d4(int32_t level)
     MkwWebWatchdog();
     const bool prev = g_interrupts_enabled.exchange(level != 0);
     UpdateCurrentContextInterruptFlag(level != 0);
+#if defined(__EMSCRIPTEN__)
+    if (level != 0) {
+        MkwWebServiceInterruptsInLongSlice();
+    }
+#endif
     return prev ? 1 : 0;
 }
 
@@ -71,6 +116,9 @@ extern "C" int32_t OS__EnableInterrupts_801a65c0()
     MkwWebWatchdog();
     const bool prev = g_interrupts_enabled.exchange(true);
     UpdateCurrentContextInterruptFlag(true);
+#if defined(__EMSCRIPTEN__)
+    MkwWebServiceInterruptsInLongSlice();
+#endif
     return prev ? 1 : 0;
 }
 

@@ -715,3 +715,37 @@ extern "C" void OSResumeThread_HLE_801aa58c(CpuContext* ctx)
     OS__RestoreInterrupts_801a65d4(irqState);
 }
 PPC_NATIVE_OVERRIDE_VOID(801AA58C, OSResumeThread_HLE_801aa58c, (CpuContext* ctx), (ctx));
+
+#if defined(__EMSCRIPTEN__)
+#include <emscripten.h>
+#include <cstdio>
+
+// Dev aid (web): Module._mkw_debug_dump_threads() prints every guest thread and the
+// scheduler state, for diagnosing hangs from the browser console.
+extern "C" EMSCRIPTEN_KEEPALIVE void mkw_debug_dump_threads()
+{
+    using namespace OsHleInternal;
+    std::printf("[threads] running=0x%08x current=0x%08x pending=0x%08x disable=%u irq=%d fiber=0x%08x\n",
+                ::Memory::Read32(kOSRunningContextAddr), ::Memory::Read32(kOSCurrentContextAddr),
+                ::Memory::Read32(kSchedulerPendingFlagAddr), ::Memory::Read32(kSchedulerIdleFlagAddr),
+                OS_HLE_InterruptsEnabled() ? 1 : 0, Fiber::GuestFiberManager::GetCurrentGuestThread());
+    int guard = 0;
+    for (uint32_t t = ::Memory::Read32(kThreadListHeadAddr); t != 0 && guard < 64; ++guard) {
+        std::printf("[threads]  0x%08x state=%u prio=%d base=%d suspend=%d queue=0x%08x mutex=0x%08x lr=0x%08x\n", t,
+                    ::Memory::Read16(t + kThreadStateOffset),
+                    static_cast<int32_t>(::Memory::Read32(t + kThreadPriorityOffset)),
+                    static_cast<int32_t>(::Memory::Read32(t + kThreadBasePriorityOffset)),
+                    static_cast<int32_t>(::Memory::Read32(t + kThreadSuspendOffset)),
+                    ::Memory::Read32(t + kThreadQueueOffset), ::Memory::Read32(t + kThreadMutexOffset),
+                    ::Memory::Read32(t + 0x84u));
+        t = ::Memory::Read32(t + kThreadListNextOffset);
+    }
+    std::fflush(stdout);
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE uint32_t mkw_debug_read32(uint32_t address)
+{
+    uint32_t value = 0;
+    return ::Memory::TryRead32(address, value) ? value : 0xDEADBEEFu;
+}
+#endif

@@ -195,6 +195,17 @@ void render_frame_data() noexcept {
   g_frameDataBuilt = true;
 }
 
+bool draw_data_fits(uint32_t width, uint32_t height) noexcept {
+  render_frame_data();
+  const auto* data = ImGui::GetDrawData();
+  if (data == nullptr) {
+    return true;
+  }
+  const float drawWidth = data->DisplaySize.x * data->FramebufferScale.x;
+  const float drawHeight = data->DisplaySize.y * data->FramebufferScale.y;
+  return drawWidth <= static_cast<float>(width) + 0.5f && drawHeight <= static_cast<float>(height) + 0.5f;
+}
+
 void render(const wgpu::RenderPassEncoder& pass) noexcept {
   ZoneScoped;
   render_frame_data();

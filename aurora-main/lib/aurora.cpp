@@ -914,6 +914,10 @@ double g_mkwWebDvdWaitMs = 0.0;
 uint32_t g_mkwWebDvdReads = 0;
 uint32_t g_mkwWebPipelinesStarted = 0;
 double g_mkwWebPipelineWaitMs = 0.0;
+double g_mkwWebMaxSliceMs = 0.0;
+uint32_t g_mkwWebMaxSliceThread = 0;
+int32_t g_mkwWebMaxSlicePriority = -1;
+uint32_t g_mkwWebIrqServices = 0;
 }
 
 // Web frame-pacing log: the FPS counter averages, but stutter is in the distribution.
@@ -928,8 +932,9 @@ void record_web_present_interval() noexcept {
     s_intervals.push_back(interval);
     if (interval > 50.0f) {
       Log.info("[web-spike] {:.1f} ms frame: {} DVD read(s) waited {:.1f} ms, {} pipeline(s) started, "
-               "pipeline waits {:.1f} ms",
-               interval, g_mkwWebDvdReads, g_mkwWebDvdWaitMs, g_mkwWebPipelinesStarted, g_mkwWebPipelineWaitMs);
+               "pipeline waits {:.1f} ms, longest guest slice {:.1f} ms (thread {:#x} prio {}), {} irq service(s)",
+               interval, g_mkwWebDvdReads, g_mkwWebDvdWaitMs, g_mkwWebPipelinesStarted, g_mkwWebPipelineWaitMs,
+               g_mkwWebMaxSliceMs, g_mkwWebMaxSliceThread, g_mkwWebMaxSlicePriority, g_mkwWebIrqServices);
     }
   }
   s_last = now;
@@ -937,6 +942,8 @@ void record_web_present_interval() noexcept {
   g_mkwWebDvdWaitMs = 0.0;
   g_mkwWebPipelinesStarted = 0;
   g_mkwWebPipelineWaitMs = 0.0;
+  g_mkwWebMaxSliceMs = 0.0;
+  g_mkwWebIrqServices = 0;
   if (now - s_windowStart < std::chrono::seconds(2) || s_intervals.empty()) {
     return;
   }
@@ -1411,7 +1418,7 @@ wgpu::BindGroup encode_presentation_snapshot(wgpu::CommandEncoder& encoder,
     pass.Draw(3);
     pass.End();
   }
-  if (includeImGui) {
+  if (includeImGui && imgui::draw_data_fits(image.texture.size.width, image.texture.size.height)) {
     const std::array attachments{
         wgpu::RenderPassColorAttachment{
             .view = image.texture.view,

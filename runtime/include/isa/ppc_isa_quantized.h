@@ -1,5 +1,7 @@
 #pragma once
 
+#include "isa/host_byteswap.h"
+
 
 #include "ppc_isa_config.h"
 #include "ppc_isa_context.h"
@@ -131,7 +133,7 @@ inline double PpcLoadPairPsqFloatFromHostInline(const uint8_t* host)
     // documented packed-double lane convention).
     uint64_t raw = 0;
     std::memcpy(&raw, host, sizeof(raw));
-    const uint64_t swapped = __builtin_bswap64(raw);
+    const uint64_t swapped = MkwByteSwap64(raw);
     return PpcBitCastToDoubleInline(PpcLoadPairPsqFloatBitsPackedInline(swapped));
 #endif
 }
@@ -147,7 +149,7 @@ inline void PpcStorePairPsqFloatToHostInline(uint8_t* host, double value)
     // Inverse of the load path above: bswap64 is its own inverse, so applying
     // it to the quieted packed value reproduces the on-disk big-endian bytes.
     const uint64_t quieted = PpcStorePairPsqFloatBitsPackedInline(PpcBitCastToU64Inline(value));
-    const uint64_t swapped = __builtin_bswap64(quieted);
+    const uint64_t swapped = MkwByteSwap64(quieted);
     std::memcpy(host, &swapped, sizeof(swapped));
 #endif
 }

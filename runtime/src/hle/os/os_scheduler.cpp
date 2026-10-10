@@ -10,6 +10,7 @@
 #include "fiber_manager.h"
 #include "runtime_log.h"
 #include "os_internal.h"
+#include "platform/web_slices.h"
 
 namespace {
 void LinkMutexToThread(uint32_t threadPtr, uint32_t mutexPtr)
@@ -221,6 +222,9 @@ extern "C" void SelectThread_801a9c08(CpuContext* ctx)
         
         // Set current context to idle thread context
         OS__SetCurrentContext_801a1e70(kIdleThreadContextAddr);
+#if defined(__EMSCRIPTEN__)
+        MkwWebSlices::Begin(0, -1);
+#endif
         
         while (true) {
             // Enable interrupts and idle until something becomes runnable.
@@ -322,6 +326,9 @@ extern "C" void SelectThread_801a9c08(CpuContext* ctx)
     
     // Set thread to RUNNING state
     ::Memory::Write16(nextThread + 0x2C8u, 2);
+#if defined(__EMSCRIPTEN__)
+    MkwWebSlices::Begin(nextThread, static_cast<int32_t>(priorityLevel));
+#endif
 
     // Invoke switch callback
     TryInvokeSwitchCallback(runningContext, nextThread, cpu);

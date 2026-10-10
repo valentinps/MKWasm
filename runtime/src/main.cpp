@@ -91,7 +91,7 @@ void ServiceGuestTimingDuringAuroraFrameWait() {
     // Aurora can block inside FIFO drains before control returns to GX HLE, for as long as a
     // whole display period. Keep VI retraces, alarms and audio moving at wall-clock cadence here
     // while still suppressing guest rescheduling and recursive Aurora work.
-    VI_HLE_ProcessRetracesDeferred(8);
+    VI_HLE_ProcessRetracesWhileGuestBusy(8);
     OS_HLE_ProcessAlarmsDeferred(8);
     Audio_HLE_PollDeferred();
 }

@@ -11,6 +11,9 @@
 void VI_HLE_ForceRetrace(CpuContext* ctx);
 void VI_HLE_PollRetrace(CpuContext* ctx);
 void VI_HLE_ProcessRetracesDeferred(int maxToProcess);
+// The same, from a point where the guest is still producing its frame (GX work, Aurora waits,
+// interrupt delivery); the web build lets VBlank run late there instead of landing mid-frame.
+void VI_HLE_ProcessRetracesWhileGuestBusy(int maxToProcess);
 void VI_HLE_WaitForNextRetracePoll();
 // Single owner of the Aurora frame presentation sequence (seal, optional pace
 // to the VI retrace boundary, pre-warm the next frame). paceToRetrace is true

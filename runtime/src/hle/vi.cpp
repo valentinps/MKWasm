@@ -415,7 +415,13 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
     s_inAdvanceRetrace.store(false);
 }
 
-bool AdvanceDueRetraces(CpuContext* ctx, int maxToProcess, bool serviceAurora)
+#if defined(__EMSCRIPTEN__)
+// A VBlank delivered later than this slips the VI timeline to the delivery time instead of
+// replaying the lost time as a burst of back-to-back retraces.
+constexpr auto kWebRetraceSlip = std::chrono::milliseconds(4);
+#endif
+
+bool AdvanceDueRetraces(CpuContext* ctx, int maxToProcess, bool serviceAurora, bool guestBusy = false)
 {
     bool advancedAny = false;
 
@@ -432,6 +438,19 @@ bool AdvanceDueRetraces(CpuContext* ctx, int maxToProcess, bool serviceAurora)
                 return advancedAny;
             }
 #if defined(__EMSCRIPTEN__)
+            // While the guest is still producing its frame (the GX, interrupt and Aurora wait
+            // service points), hold a due VBlank back for up to one interval. Delivered mid-frame,
+            // it makes a frame that needs 18 ms wait for the following VBlank and land at 33 ms,
+            // the hard 60/30 alternation the race showed; delivered when the guest waits for it,
+            // the frame takes 18 ms and the VI timeline slips below. Dolphin behaves the same way,
+            // since its VI clock is emulated time and slows down with the host.
+            if (guestBusy && now - target < g_vi.retraceInterval) {
+                return advancedAny;
+            }
+            if (now - target > kWebRetraceSlip && now - target <= 4 * g_vi.retraceInterval) {
+                g_vi.lastRetrace = now - g_vi.retraceInterval;
+                target = now;
+            }
             // A long stall (course load, GC pause, background tab) leaves many retraces
             // overdue. Replaying them back to back runs the guest's retrace callbacks
             // faster than real time can pass, and the page never yields again. Drop the
@@ -482,7 +501,7 @@ void VI_HLE_PollRetrace(CpuContext* ctx) {
     AdvanceDueRetraces(ctx, 8, true);
 }
 
-void VI_HLE_ProcessRetracesDeferred(int maxToProcess) {
+static void ProcessRetracesDeferred(int maxToProcess, bool guestBusy) {
     if (maxToProcess <= 0 || !OS_HLE_InterruptsEnabled()) {
         return;
     }
@@ -499,12 +518,24 @@ void VI_HLE_ProcessRetracesDeferred(int maxToProcess) {
     // all recursive Aurora/event work until the native GX call has unwound.
     OS_HLE_BeginDeferredGuestCallbacks();
     try {
-        AdvanceDueRetraces(cpu, maxToProcess, false);
+        AdvanceDueRetraces(cpu, maxToProcess, false, guestBusy);
     } catch (...) {
         OS_HLE_EndDeferredGuestCallbacks();
         throw;
     }
     OS_HLE_EndDeferredGuestCallbacks();
+}
+
+void VI_HLE_ProcessRetracesDeferred(int maxToProcess) {
+    ProcessRetracesDeferred(maxToProcess, false);
+}
+
+void VI_HLE_ProcessRetracesWhileGuestBusy(int maxToProcess) {
+#if defined(__EMSCRIPTEN__)
+    ProcessRetracesDeferred(maxToProcess, true);
+#else
+    ProcessRetracesDeferred(maxToProcess, false);
+#endif
 }
 
 void VI_HLE_WaitForNextRetracePoll() {

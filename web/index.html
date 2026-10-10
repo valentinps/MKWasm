@@ -170,6 +170,99 @@ dvd_root = "${DVD_ROOT}"
     }, {once: true});
     document.body.appendChild(play);
   }).observe(document.body, {childList: true});
+  // Dev aid (?autorace[=seconds]): drive the menus into a Grand Prix race and hold accelerate
+  // for the given time (default 40 s), with no clicks needed. Progress goes to the log as
+  // [autorace] lines; a menu that stops responding gets a thread dump and a B press.
+  if (['localhost', '127.0.0.1'].includes(location.hostname) && new URLSearchParams(location.search).has('autorace')) {
+    const params = new URLSearchParams(location.search);
+    const raceSeconds = Number(params.get('autorace')) || 40;
+    const say = (text) => Module.print(`[autorace] ${text}`);
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const key = (code, down) => {
+      const event = new KeyboardEvent(down ? 'keydown' : 'keyup', {key: code === 'KeyX' ? 'x' : code === 'KeyZ' ? 'z' : code, code, bubbles: true, cancelable: true});
+      Module.canvas.dispatchEvent(event);
+    };
+    const press = async (code, holdMs = 200) => { key(code, true); await sleep(holdMs); key(code, false); };
+    const seen = (text) => mkwLog.some((line) => line.includes(text));
+    (async () => {
+      while (!document.getElementById('play')) await sleep(250);
+      document.getElementById('play').remove();
+      Module.canvas.focus();
+      say('started');
+      // Raceinfo::sInstance (PAL) only exists while a race scene is loaded; the title screen's
+      // attract demo is a race too, which is why it must stay up for a while before counting.
+      const read32 = (address) => Module._mkw_debug_read32(address) >>> 0;
+      const inRace = () => read32(0x809bd730) !== 0; // System::RaceManager::s_instance
+      // UI::SectionManager::s_instance (PAL): current section id, next section, top page id/state
+      // (layouts from mkw-sp's Section.hh / Page.hh).
+      const hex = (v) => v.toString(16);
+      const menuState = () => {
+        const manager = read32(0x809c1e38);
+        if (!manager) return 'no section manager';
+        const section = read32(manager);
+        if (!section) return `no section (next ${hex(read32(manager + 0x0c))})`;
+        const count = read32(section + 0x37c);
+        const page = count > 0 && count <= 10 ? read32(section + 0x354 + 4 * (count - 1)) : 0;
+        return `section ${hex(read32(section))} next ${hex(read32(manager + 0x0c))} state ${read32(manager + 0x30)}` +
+               (page ? ` page ${hex(read32(page + 4))} pstate ${read32(page + 8)} (${count} active)` : '');
+      };
+      let presses = 0, sinceBack = 0, raceSince = 0;
+      for (;;) {
+        if (inRace()) {
+          if (!raceSince) say(`race scene up after ${presses} presses`);
+          raceSince = raceSince || performance.now();
+          if (presses >= 6 && performance.now() - raceSince > 3000) break;
+          if (presses < 6) { await press('KeyX'); presses++; }
+          await sleep(500);
+          continue;
+        }
+        if (raceSince) say('race scene gone');
+        raceSince = 0;
+        say(`press ${presses + 1}: ${menuState()}`);
+        await press('KeyX');
+        presses++; sinceBack++;
+        await sleep(1500);
+        if (sinceBack >= 16) {
+          say(`no race after ${presses} presses; dumping threads and backing out`);
+          Module._mkw_debug_dump_threads?.();
+          await press('KeyZ'); await sleep(1500);
+          sinceBack = 0;
+        }
+        if (presses > 60) { say('giving up'); return; }
+      }
+      say(`race loaded after ${presses} presses; holding accelerate`);
+      key('KeyX', true);
+      const raceEnd = performance.now() + raceSeconds * 1000;
+      if (params.has('profile') && typeof Profiler !== 'undefined') {
+        // JS Self-Profiling (needs the dev server's Document-Policy header). The summary goes to
+        // web-stream.log through /__logline, which the periodic log mirror does not overwrite.
+        await sleep(6000);
+        const profiler = new Profiler({sampleInterval: 1, maxBufferSize: 400000});
+        await sleep(Number(params.get('profile')) * 1000 || 10000);
+        const trace = await profiler.stop();
+        const name = (i) => trace.frames[i]?.name || '(anon)';
+        const self = {}, incl = {};
+        let idle = 0;
+        for (const sample of trace.samples) {
+          if (sample.stackId === undefined) { idle++; continue; }
+          const names = new Set();
+          let first = true;
+          for (let st = trace.stacks[sample.stackId]; st; st = st.parentId !== undefined ? trace.stacks[st.parentId] : null) {
+            const n = name(st.frameId);
+            if (first) { self[n] = (self[n] || 0) + 1; first = false; }
+            if (!names.has(n)) { incl[n] = (incl[n] || 0) + 1; names.add(n); }
+          }
+        }
+        const total = trace.samples.length;
+        const top = (o, k) => Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, k).map(([n, c]) => `${(100 * c / total).toFixed(1).padStart(5)}%  ${n}`);
+        await fetch('/__logline', {method: 'POST', body: `== race profile: ${total} samples, idle ${(100 * idle / total).toFixed(1)}%\n-- self\n${top(self, 60).join('\n')}\n-- inclusive\n${top(incl, 60).join('\n')}\n`});
+        say('profile written');
+      }
+      await sleep(Math.max(0, raceEnd - performance.now()));
+      key('KeyX', false);
+      say('done');
+    })();
+  }
   window.addEventListener('error', (e) => { const text = describe(e.error ?? e.message); mkwLog.push(`[error] ${text}`); setStatus(`Error: ${text}`); });
   window.addEventListener('unhandledrejection', (e) => { const text = describe(e.reason); mkwLog.push(`[rejection] ${text}`); setStatus(`Error: ${text}`); });
 </script>

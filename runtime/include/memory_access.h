@@ -1,6 +1,7 @@
 #pragma once
 
 #include "guest_flat_memory.h"
+#include "isa/host_byteswap.h"
 #include "memory.h"
 #include "recomp_mod_loader.h"
 
@@ -269,15 +270,15 @@ MKW_MEMORY_FORCE_INLINE uint8_t* ResolveRangeHost(uint32_t base, int32_t minOffs
 // Guest-address byte order. Distinct from isa/big_endian.h, which is the
 // host-pointer codec; do not "unify" them.
 inline uint16_t ByteSwap16(uint16_t value) {
-    return __builtin_bswap16(value);
+    return MkwByteSwap16(value);
 }
 
 inline uint32_t ByteSwap32(uint32_t value) {
-    return __builtin_bswap32(value);
+    return MkwByteSwap32(value);
 }
 
 inline uint64_t ByteSwap64(uint64_t value) {
-    return __builtin_bswap64(value);
+    return MkwByteSwap64(value);
 }
 
 template <typename T>

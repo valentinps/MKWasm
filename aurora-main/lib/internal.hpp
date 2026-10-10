@@ -1,5 +1,9 @@
 #pragma once
 
+#if defined(__wasm_simd128__)
+#include <wasm_simd128.h>
+#endif
+
 #include "logging.hpp" // IWYU pragma: keep
 
 #include <aurora/aurora.h>
@@ -32,7 +36,15 @@ constexpr T bswap(T val) noexcept {
     uint16_t u;
     T t;
   } v{.t = val};
-#if __GNUC__
+#if defined(__wasm_simd128__)
+  // wasm has no byte-swap instruction; a one-lane swizzle is far cheaper in V8 than the
+  // shift/or chain __builtin_bswap lowers to (see runtime/include/isa/host_byteswap.h).
+  if (std::is_constant_evaluated()) {
+    v.u = __builtin_bswap16(v.u);
+  } else {
+    v.u = static_cast<uint16_t>(wasm_u16x8_extract_lane(wasm_i8x16_swizzle(wasm_i16x8_splat(static_cast<int16_t>(v.u)), wasm_i8x16_const(1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14)), 0));
+  }
+#elif __GNUC__
   v.u = __builtin_bswap16(v.u);
 #elif _WIN32
   v.u = _byteswap_ushort(v.u);
@@ -49,7 +61,15 @@ constexpr T bswap(T val) noexcept {
     uint32_t u;
     T t;
   } v{.t = val};
-#if __GNUC__
+#if defined(__wasm_simd128__)
+  // wasm has no byte-swap instruction; a one-lane swizzle is far cheaper in V8 than the
+  // shift/or chain __builtin_bswap lowers to (see runtime/include/isa/host_byteswap.h).
+  if (std::is_constant_evaluated()) {
+    v.u = __builtin_bswap32(v.u);
+  } else {
+    v.u = static_cast<uint32_t>(wasm_i32x4_extract_lane(wasm_i8x16_swizzle(wasm_i32x4_splat(static_cast<int32_t>(v.u)), wasm_i8x16_const(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12)), 0));
+  }
+#elif __GNUC__
   v.u = __builtin_bswap32(v.u);
 #elif _WIN32
   v.u = _byteswap_ulong(v.u);
@@ -66,7 +86,15 @@ constexpr T bswap(T val) noexcept {
     uint64_t u;
     T t;
   } v{.t = val};
-#if __GNUC__
+#if defined(__wasm_simd128__)
+  // wasm has no byte-swap instruction; a one-lane swizzle is far cheaper in V8 than the
+  // shift/or chain __builtin_bswap lowers to (see runtime/include/isa/host_byteswap.h).
+  if (std::is_constant_evaluated()) {
+    v.u = __builtin_bswap64(v.u);
+  } else {
+    v.u = static_cast<uint64_t>(wasm_i64x2_extract_lane(wasm_i8x16_swizzle(wasm_i64x2_splat(static_cast<int64_t>(v.u)), wasm_i8x16_const(7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13, 12, 11, 10, 9, 8)), 0));
+  }
+#elif __GNUC__
   v.u = __builtin_bswap64(v.u);
 #elif _WIN32
   v.u = _byteswap_uint64(v.u);

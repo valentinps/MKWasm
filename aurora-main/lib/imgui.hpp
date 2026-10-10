@@ -20,4 +20,7 @@ void new_frame(const AuroraWindowSize& size) noexcept;
 // once and every presentation slot replays them. Reset by new_frame.
 void render_frame_data() noexcept;
 void render(const wgpu::RenderPassEncoder& pass) noexcept;
+// Whether the built draw data fits a target of the given pixel size. A resize between building the
+// draw data and encoding it leaves scissor rects outside the smaller target, which WebGPU rejects.
+bool draw_data_fits(uint32_t width, uint32_t height) noexcept;
 } // namespace aurora::imgui

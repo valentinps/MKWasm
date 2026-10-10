@@ -257,7 +257,7 @@ void ServiceDeferredTimingDuringGxWork() {
             // PAL50 uses an OS alarm. Keep both clocks moving while a slow
             // host frame is still being submitted, but defer fiber switches
             // and Aurora work until the native GX call has unwound.
-            VI_HLE_ProcessRetracesDeferred(8);
+            VI_HLE_ProcessRetracesWhileGuestBusy(8);
             OS_HLE_ProcessAlarmsDeferred(8);
         } else if (TryGetCpuContext() != nullptr) {
             // Same interrupt isolation as the deferred paths above: this GX call
