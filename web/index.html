@@ -10,6 +10,10 @@
   /* SDL owns the canvas size (window size x devicePixelRatio); CSS sizing here would make
      SDL, ImGui and the WebGPU surface disagree about it. */
   #canvas { display: block; margin: 0 auto; outline: none; }
+  /* In fill-document mode (position: fixed, set by SDL) the canvas always covers the viewport.
+     SDL only rewrites the CSS size when devicePixelRatio != 1, so a zoom change back to 100%
+     would otherwise leave a stale size behind; the backing store already tracks the viewport. */
+  #canvas[style*="position: fixed"] { width: 100vw !important; height: 100vh !important; }
   #status { position: fixed; left: 12px; bottom: 12px; padding: 6px 10px; background: #000a; border-radius: 4px; white-space: pre-wrap; max-width: 80vw; }
 </style>
 </head>
