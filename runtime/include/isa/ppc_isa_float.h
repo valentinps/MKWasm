@@ -427,14 +427,14 @@ inline float PpcAccuratePsMaddLaneInline(float a, float c, float b)
     // explicit float FMA therefore matches Gekko's single rounding point;
     // multiplying and adding separately can differ by an ULP on ordinary
     // vector and matrix workloads.
-    return PpcFlushSingleForNiInline(std::fma(a, c, signedB));
+    return PpcFlushSingleForNiInline(MkwFmaInline(a, c, signedB));
 }
 
 template <bool Subtract>
 inline float PpcAccuratePsMaddLaneNoNiInline(float a, float c, float b)
 {
     const float signedB = Subtract ? -b : b;
-    return std::fma(a, c, signedB);
+    return MkwFmaInline(a, c, signedB);
 }
 
 template <bool Subtract>
@@ -447,7 +447,7 @@ inline double PpcAccurateSingleMaddIntermediateInline(double a, double c, double
     // Recover the direction of that discarded error for those tie cases.
     const double roundedC = PpcForce25BitInline(c);
     const double signedB = Subtract ? -b : b;
-    double result = std::fma(a, roundedC, signedB);
+    double result = MkwFmaInline(a, roundedC, signedB);
     const uint64_t resultBits = PpcBitCastToU64Inline(result);
     constexpr uint64_t kDiscardedMask = 0x000000001FFFFFFFULL;
     constexpr uint64_t kEvenTie = 0x0000000010000000ULL;
@@ -455,7 +455,7 @@ inline double PpcAccurateSingleMaddIntermediateInline(double a, double c, double
     {
         const double aPrime = signedB - result;
         const double bPrime = result + aPrime;
-        const double deltaA = std::fma(a, roundedC, aPrime);
+        const double deltaA = MkwFmaInline(a, roundedC, aPrime);
         const double deltaB = signedB - bPrime;
         const double error = deltaA + deltaB;
         if (error != 0.0)
@@ -480,23 +480,23 @@ inline double PpcFmulsNoNiInline(double a, double c)
 
 inline double PpcFmaddInline(double a, double c, double b)
 {
-    return std::fma(a, c, b);
+    return MkwFmaInline(a, c, b);
 }
 
 inline double PpcFmsubInline(double a, double c, double b)
 {
-    return std::fma(a, c, -b);
+    return MkwFmaInline(a, c, -b);
 }
 
 inline double PpcFnmaddInline(double a, double c, double b)
 {
-    const double result = std::fma(a, c, b);
+    const double result = MkwFmaInline(a, c, b);
     return std::isnan(result) ? result : -result;
 }
 
 inline double PpcFnmsubInline(double a, double c, double b)
 {
-    const double result = std::fma(a, c, -b);
+    const double result = MkwFmaInline(a, c, -b);
     return std::isnan(result) ? result : -result;
 }
 
@@ -595,7 +595,7 @@ inline double PPC_PsMulNoNiInline(double lhs, double rhs)
 }
 
 // The paired madd family lowers to one hardware FMA. Semantics match the scalar lanes exactly: a
-// single fused rounding per lane (std::fma(float) == vfmaddps per lane), and
+// single fused rounding per lane (MkwFmaInline(float) == vfmaddps per lane), and
 // the negate-unless-NaN behavior of the nmadd/nmsub forms is expressed with
 // PpcNegateNonNanLanesInline. NI flushing is handled by MXCSR (see
 // MkwApplyHostNiMode), so the NI and NoNi entry points are identical here.

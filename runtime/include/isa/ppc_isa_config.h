@@ -18,6 +18,22 @@
 #error "ppc_isa_config.h has no SIMD intrinsics header for this architecture"
 #endif
 
+#include <cmath>
+
+// Fused multiply-add for the PPC scalar fmadd family. wasm has no scalar FMA, so std::fma is
+// a libm software routine there (~1,400 call sites in physics/matrix code); relaxed SIMD's
+// madd lowers to the host FMA instruction, which native builds already require (x86-64-v3).
+inline double MkwFmaInline(double a, double b, double c) noexcept
+{
+#if defined(__wasm_relaxed_simd__)
+    return wasm_f64x2_extract_lane(
+        wasm_f64x2_relaxed_madd(wasm_f64x2_splat(a), wasm_f64x2_splat(b), wasm_f64x2_splat(c)), 0);
+#else
+    return std::fma(a, b, c);
+#endif
+}
+
+
 inline constexpr bool MkwStateFreeAbiEnabled(uint32_t) noexcept
 {
     return true;
