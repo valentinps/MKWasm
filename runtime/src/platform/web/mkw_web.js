@@ -295,4 +295,108 @@ addToLibrary({
     } while (performance.now() < deadline);
     return 0;
   },
+
+  // Audio output on an AudioWorklet (see audio_backend.cpp). The processor keeps its own
+  // queue on the audio rendering thread, so main-thread stalls no longer starve playback.
+  // Queue depth = frames posted - frames the worklet reports as consumed.
+  $MkwAudio: {
+    ctx: null,
+    node: null,
+    gainNode: null,
+    pending: [],
+    posted: 0,
+    consumed: 0,
+    channels: 2,
+    gain: 1,
+    processorSource: `
+      class MkwPlayer extends AudioWorkletProcessor {
+        constructor(options) {
+          super();
+          this.channels = options.processorOptions.channels;
+          this.prebuffer = Math.round(sampleRate * 0.06);
+          this.queue = [];
+          this.offset = 0;
+          this.queued = 0;
+          this.consumed = 0;
+          this.playing = false;
+          this.ticks = 0;
+          this.port.onmessage = (e) => { this.queue.push(e.data); this.queued += e.data.length / this.channels; };
+        }
+        process(inputs, outputs) {
+          const out = outputs[0];
+          const frames = out[0].length;
+          if (!this.playing && this.queued >= this.prebuffer) this.playing = true;
+          let i = 0;
+          if (this.playing) {
+            for (; i < frames && this.queue.length; i++) {
+              const buf = this.queue[0];
+              for (let c = 0; c < out.length; c++) out[c][i] = buf[this.offset + Math.min(c, this.channels - 1)];
+              this.offset += this.channels;
+              if (this.offset >= buf.length) { this.queue.shift(); this.offset = 0; }
+            }
+            this.queued -= i;
+            this.consumed += i;
+            if (!this.queue.length) this.playing = false;  // underrun: rebuild the prebuffer
+          }
+          for (; i < frames; i++) for (let c = 0; c < out.length; c++) out[c][i] = 0;
+          if ((++this.ticks & 7) === 0) this.port.postMessage(this.consumed);
+          return true;
+        }
+      }
+      registerProcessor('mkw-player', MkwPlayer);`,
+
+    async start(rate, channels) {
+      const ctx = new AudioContext({sampleRate: rate, latencyHint: 'interactive'});
+      MkwAudio.ctx = ctx;
+      MkwAudio.channels = channels;
+      // Debug aid: window.Module.mkwAudioState() from the console.
+      Module['mkwAudioState'] = () => ({
+        state: ctx.state, rate: ctx.sampleRate, posted: MkwAudio.posted, consumed: MkwAudio.consumed,
+        queuedMs: Math.round(1000 * (MkwAudio.posted - MkwAudio.consumed) / ctx.sampleRate),
+      });
+      const resume = () => { if (ctx.state !== 'running') ctx.resume(); };
+      for (const type of ['pointerdown', 'keydown']) window.addEventListener(type, resume, {capture: true});
+      resume();
+      const url = URL.createObjectURL(new Blob([MkwAudio.processorSource], {type: 'text/javascript'}));
+      await ctx.audioWorklet.addModule(url);
+      URL.revokeObjectURL(url);
+      const node = new AudioWorkletNode(ctx, 'mkw-player', {
+        numberOfInputs: 0, outputChannelCount: [channels], processorOptions: {channels},
+      });
+      node.port.onmessage = (e) => { MkwAudio.consumed = e.data; };
+      const gainNode = ctx.createGain();
+      gainNode.gain.value = MkwAudio.gain;
+      node.connect(gainNode).connect(ctx.destination);
+      MkwAudio.gainNode = gainNode;
+      MkwAudio.node = node;
+      for (const block of MkwAudio.pending) node.port.postMessage(block, [block.buffer]);
+      MkwAudio.pending = [];
+    },
+  },
+
+  mkw_web_audio_open__deps: ['$MkwAudio'],
+  mkw_web_audio_open: (rate, channels) => {
+    if (MkwAudio.ctx) return;
+    MkwAudio.start(rate, channels).catch((e) => err(`audio worklet: ${e}`));
+  },
+
+  mkw_web_audio_push__deps: ['$MkwAudio'],
+  mkw_web_audio_push: (samplesPtr, frames) => {
+    const count = frames * MkwAudio.channels;
+    const block = new Float32Array(count);
+    const src = HEAP16.subarray(samplesPtr >> 1, (samplesPtr >> 1) + count);
+    for (let i = 0; i < count; i++) block[i] = src[i] / 32768;
+    MkwAudio.posted += frames;
+    if (MkwAudio.node) MkwAudio.node.port.postMessage(block, [block.buffer]);
+    else MkwAudio.pending.push(block);
+  },
+
+  mkw_web_audio_queued_frames__deps: ['$MkwAudio'],
+  mkw_web_audio_queued_frames: () => Math.max(0, MkwAudio.posted - MkwAudio.consumed),
+
+  mkw_web_audio_set_gain__deps: ['$MkwAudio'],
+  mkw_web_audio_set_gain: (gain) => {
+    MkwAudio.gain = gain;
+    if (MkwAudio.gainNode) MkwAudio.gainNode.gain.value = gain;
+  },
 });

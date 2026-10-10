@@ -25,6 +25,7 @@
 <script>
   // Keep the runtime's output for inspection (window.mkwLog) alongside the console.
   window.mkwLog = [];
+  window.mkwLogTimes = [];  // performance.now() per line, for lining logs up with profiles
   // Dev aid: mirror the log to the local dev server (web/serve.mjs writes web-run.log).
   if (['localhost', '127.0.0.1'].includes(location.hostname)) {
     let posted = 0;
@@ -79,19 +80,29 @@ enabled = false
 dvd_root = "${DVD_ROOT}"
 `;
 
-  // Mirrors MEMFS changes under DATA_HOME back to IndexedDB: periodically, and whenever the
-  // tab is hidden or closed (the last chance to save).
+  // Mirrors MEMFS changes under DATA_HOME back to IndexedDB. A sync scans and re-stores
+  // changed files on the main thread, so it runs only after the game wrote its NAND (saves
+  // happen at menus and after races) and whenever the tab is hidden or closed. The pipeline
+  // cache database, which changes constantly, rides along with those syncs.
   let userDataSyncing = false;
+  let userDataDirty = false;
   const persistUserData = () => {
     if (userDataSyncing || typeof FS === 'undefined') return;
     userDataSyncing = true;
+    userDataDirty = false;
     FS.syncfs(false, (error) => {
       userDataSyncing = false;
       if (error) console.warn('Saving user data failed:', error);
     });
   };
   const startUserDataSync = () => {
-    setInterval(persistUserData, 5000);
+    const nandRoot = `${DATA_HOME}/WiiCompiled/NAND/`;
+    const write = FS.write;
+    FS.write = function (stream, ...args) {
+      if (stream?.path?.startsWith(nandRoot)) userDataDirty = true;
+      return write.call(this, stream, ...args);
+    };
+    setInterval(() => { if (userDataDirty) persistUserData(); }, 2000);
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') persistUserData(); });
     window.addEventListener('pagehide', persistUserData);
   };
@@ -103,8 +114,8 @@ dvd_root = "${DVD_ROOT}"
     // Files warmed into the disc cache in the background (random-access reads at race start).
     mkwPrefetch: ['files/sound/revo_kart.brsar'],
     locateFile: (name) => `build/${name}`,
-    print: (text) => { mkwLog.push(text); streamLog(text); console.log(text); },
-    printErr: (text) => { mkwLog.push(text); streamLog(text); console.warn(text); },
+    print: (text) => { mkwLog.push(text); mkwLogTimes.push(performance.now()); streamLog(text); console.log(text); },
+    printErr: (text) => { mkwLog.push(text); mkwLogTimes.push(performance.now()); streamLog(text); console.warn(text); },
     setStatus: (text) => setStatus(text),
     preRun: [() => {
       // Game files stay on the server and are range-read on demand (mkw_web_read_file);

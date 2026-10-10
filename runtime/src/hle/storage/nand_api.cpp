@@ -133,7 +133,14 @@ extern "C" int32_t NANDOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint32_t
     // Existing-file write opens go through a shadow copy seeded from the original, so a
     // crash between NANDWrite and NANDClose cannot leave a torn file (the game patches
     // sub-ranges, e.g. ghost saves at a non-zero offset). New files still create in place.
-    if ((mode == 2 || mode == 3) && PathExists(hostPath) && !IsDirectory(hostPath)) {
+    // Web: the NAND lives in memory and reaches IndexedDB only through whole-file syncs, so
+    // a torn host file cannot happen; the copy (the 2.8 MB save on every open) just stalled.
+#if defined(__EMSCRIPTEN__)
+    constexpr bool kShadowExistingWrites = false;
+#else
+    constexpr bool kShadowExistingWrites = true;
+#endif
+    if (kShadowExistingWrites && (mode == 2 || mode == 3) && PathExists(hostPath) && !IsDirectory(hostPath)) {
         if (IsHostPathOpen(hostPath)) {
             // Another live handle already refers to this file. A shadow would hide the
             // writes from that handle, so stay in place for this open.

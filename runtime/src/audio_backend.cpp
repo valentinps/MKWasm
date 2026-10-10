@@ -9,6 +9,16 @@
 
 #include <SDL3/SDL_init.h>
 
+#if defined(__EMSCRIPTEN__)
+// platform/web/mkw_web.js: an AudioWorklet player. SDL3's web backend renders from a
+// ScriptProcessorNode on the main thread with ~40 ms of buffer, so every long frame (scene
+// loads) was an audible dropout; the worklet plays from its own buffer on the audio thread.
+extern "C" void mkw_web_audio_open(uint32_t sampleRate, uint32_t channels);
+extern "C" void mkw_web_audio_push(const int16_t* samples, uint32_t frames);
+extern "C" uint32_t mkw_web_audio_queued_frames(void);
+extern "C" void mkw_web_audio_set_gain(float gain);
+#endif
+
 AudioBackend& AudioBackend::Instance() {
     static AudioBackend instance;
     return instance;
@@ -19,6 +29,12 @@ float AudioBackend::EffectiveGainLocked() const {
 }
 
 void AudioBackend::ApplyGainLocked() {
+#if defined(__EMSCRIPTEN__)
+    if (m_initialized) {
+        mkw_web_audio_set_gain(EffectiveGainLocked());
+    }
+    return;
+#endif
     if (m_stream && !SDL_SetAudioStreamGain(m_stream, EffectiveGainLocked())) {
         RT_LOG(RT_TAG_AUDIO) << "SDL_SetAudioStreamGain failed: " << SDL_GetError() << std::endl;
     }
@@ -40,6 +56,15 @@ bool AudioBackend::EnsureInitializedLocked(uint32_t sampleRate, uint32_t channel
     if (m_initialized && m_sampleRate == sampleRate && m_channels == channels) {
         return true;
     }
+#if defined(__EMSCRIPTEN__)
+    mkw_web_audio_open(sampleRate, channels);
+    mkw_web_audio_set_gain(EffectiveGainLocked());
+    m_spec = SDL_AudioSpec{SDL_AUDIO_S16LE, static_cast<int>(channels), static_cast<int>(sampleRate)};
+    m_sampleRate = sampleRate;
+    m_channels = channels;
+    m_initialized = true;
+    return true;
+#endif
 
     if (m_stream) {
         SDL_DestroyAudioStream(m_stream);
@@ -104,7 +129,12 @@ void AudioBackend::Shutdown() {
 }
 
 uint32_t AudioBackend::QueueLimitBytesLocked() const {
+#if defined(__EMSCRIPTEN__)
+    // Playback no longer depends on the main thread, so the queue can absorb load stalls.
+    constexpr uint32_t queueMs = 250;
+#else
     constexpr uint32_t queueMs = 120;
+#endif
 
     const uint64_t bytesPerSecond = static_cast<uint64_t>(m_spec.freq) *
                                     static_cast<uint64_t>(m_spec.channels) *
@@ -113,10 +143,14 @@ uint32_t AudioBackend::QueueLimitBytesLocked() const {
 }
 
 bool AudioBackend::QueueHasCapacityLocked(int incomingBytes) {
+#if defined(__EMSCRIPTEN__)
+    const int queued = static_cast<int>(mkw_web_audio_queued_frames() * m_channels * sizeof(int16_t));
+#else
     if (!m_stream) {
         return false;
     }
     const int queued = SDL_GetAudioStreamQueued(m_stream);
+#endif
     if (queued < 0) {
         return true;
     }
@@ -137,13 +171,30 @@ bool AudioBackend::QueueHasCapacityLocked(int incomingBytes) {
     return true;
 }
 
+bool AudioBackend::HasOutputLocked() const {
+#if defined(__EMSCRIPTEN__)
+    return m_initialized;
+#else
+    return m_initialized && m_stream;
+#endif
+}
+
+bool AudioBackend::PutLocked(const int16_t* samples, int lenBytes) {
+#if defined(__EMSCRIPTEN__)
+    mkw_web_audio_push(samples, static_cast<uint32_t>(lenBytes / sizeof(int16_t) / std::max<uint32_t>(m_channels, 1)));
+    return true;
+#else
+    return SDL_PutAudioStreamData(m_stream, samples, lenBytes);
+#endif
+}
+
 bool AudioBackend::PushWiiAiSamplesBE16(const uint8_t* data, size_t bytes) {
     if (!data || bytes == 0) {
         return false;
     }
 
     std::lock_guard<std::mutex> lock(m_mutex);
-    if (!m_initialized || !m_stream) {
+    if (!HasOutputLocked()) {
         return false;
     }
 
@@ -172,7 +223,7 @@ bool AudioBackend::PushWiiAiSamplesBE16(const uint8_t* data, size_t bytes) {
     if (!QueueHasCapacityLocked(lenBytes)) {
         return true;
     }
-    if (!SDL_PutAudioStreamData(m_stream, m_convertBuffer.data(), lenBytes)) {
+    if (!PutLocked(m_convertBuffer.data(), lenBytes)) {
         RT_LOG(RT_TAG_AUDIO) << "SDL_PutAudioStreamData failed: " << SDL_GetError() << std::endl;
         return false;
     }
@@ -186,7 +237,7 @@ bool AudioBackend::PushSamplesLE16(const int16_t* samples, size_t sampleCount) {
     }
 
     std::lock_guard<std::mutex> lock(m_mutex);
-    if (!m_initialized || !m_stream) {
+    if (!HasOutputLocked()) {
         return false;
     }
 
@@ -194,7 +245,7 @@ bool AudioBackend::PushSamplesLE16(const int16_t* samples, size_t sampleCount) {
     if (!QueueHasCapacityLocked(lenBytes)) {
         return true;
     }
-    if (!SDL_PutAudioStreamData(m_stream, samples, lenBytes)) {
+    if (!PutLocked(samples, lenBytes)) {
         RT_LOG(RT_TAG_AUDIO) << "SDL_PutAudioStreamData failed: " << SDL_GetError() << std::endl;
         return false;
     }

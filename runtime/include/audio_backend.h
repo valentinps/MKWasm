@@ -30,6 +30,8 @@ private:
     AudioBackend& operator=(const AudioBackend&) = delete;
 
     bool EnsureInitializedLocked(uint32_t sampleRate, uint32_t channels);
+    bool HasOutputLocked() const;
+    bool PutLocked(const int16_t* samples, int lenBytes);
     bool QueueHasCapacityLocked(int incomingBytes);
     uint32_t QueueLimitBytesLocked() const;
     float EffectiveGainLocked() const;
