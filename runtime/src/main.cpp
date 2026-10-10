@@ -1535,7 +1535,15 @@ int RuntimeMain(int argc, char** argv) {
     }
 }
 
+#if defined(__EMSCRIPTEN__)
+// platform/web/mkw_web.js: background-warms Module.mkwPrefetch into the disc cache.
+extern "C" void mkw_web_start_prefetch(void);
+#endif
+
 int main(int argc, char** argv) {
+#if defined(__EMSCRIPTEN__)
+    mkw_web_start_prefetch();
+#endif
     return RuntimeMain(argc, argv);
 }
 extern "C" bool g_dynamicAspectRatioEnabled = false;

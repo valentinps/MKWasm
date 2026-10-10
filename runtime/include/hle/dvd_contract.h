@@ -289,6 +289,9 @@ inline constexpr const char* Describe(HostReadFailure failure) noexcept {
 // the range asynchronously (JSPI-suspending) and returns the byte count, or -1 for a missing
 // file and -2 for an offset at or past the end of the file.
 extern "C" int32_t mkw_web_read_file(const char* hostPath, double offset, uint32_t length, uint8_t* destination);
+extern "C" double emscripten_get_now(void);
+extern "C" uint32_t g_mkwWebDvdReads;  // stall attribution, defined in aurora (web build)
+extern "C" double g_mkwWebDvdWaitMs;
 #endif
 
 // Read into private storage first and publish it only after the complete host
@@ -303,8 +306,11 @@ inline bool ReadExact(const std::filesystem::path& hostPath,
 
 #if defined(__EMSCRIPTEN__)
     std::vector<uint8_t> webStaged(length);
+    const double webReadStart = emscripten_get_now();
     const int32_t webRead = mkw_web_read_file(hostPath.generic_string().c_str(),
                                               static_cast<double>(offset), length, webStaged.data());
+    ++g_mkwWebDvdReads;
+    g_mkwWebDvdWaitMs += emscripten_get_now() - webReadStart;
     if (webRead == -1) {
         failure = HostReadFailure::MissingFile;
         return false;

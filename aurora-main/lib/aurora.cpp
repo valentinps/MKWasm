@@ -92,6 +92,12 @@ void wait_until_precise(PresentClock::time_point deadline) noexcept {
   // Busy-spin tail covering the waitable timer's wakeup jitter. 150 us was not enough in
   // practice; 400 us absorbs the observed overshoot, about 1.6 ms of one core at 240 Hz.
   constexpr auto kSpinWindow = std::chrono::microseconds(400);
+#if defined(__EMSCRIPTEN__)
+  // The browser composites the canvas at its own vsync; waiting here only spins the one
+  // thread the game runs on (sleep_until busy-waits without pthreads).
+  (void)deadline;
+  return;
+#endif
   auto now = PresentClock::now();
   if (now >= deadline) {
     return;
@@ -901,7 +907,54 @@ std::shared_ptr<PresentationImage> acquire_presentation_image(size_t slot, uint3
   return image;
 }
 
+#if defined(__EMSCRIPTEN__)
+// Per-frame stall attribution for the web build (reset at every present).
+extern "C" {
+double g_mkwWebDvdWaitMs = 0.0;
+uint32_t g_mkwWebDvdReads = 0;
+uint32_t g_mkwWebPipelinesStarted = 0;
+double g_mkwWebPipelineWaitMs = 0.0;
+}
+
+// Web frame-pacing log: the FPS counter averages, but stutter is in the distribution.
+// Every ~2 s: median/p95/max present interval and how many frames took over 25 ms.
+void record_web_present_interval() noexcept {
+  static std::optional<PresentClock::time_point> s_last;
+  static std::vector<float> s_intervals;
+  static PresentClock::time_point s_windowStart = PresentClock::now();
+  const auto now = PresentClock::now();
+  if (s_last) {
+    const float interval = std::chrono::duration<float, std::milli>(now - *s_last).count();
+    s_intervals.push_back(interval);
+    if (interval > 50.0f) {
+      Log.info("[web-spike] {:.1f} ms frame: {} DVD read(s) waited {:.1f} ms, {} pipeline(s) started, "
+               "pipeline waits {:.1f} ms",
+               interval, g_mkwWebDvdReads, g_mkwWebDvdWaitMs, g_mkwWebPipelinesStarted, g_mkwWebPipelineWaitMs);
+    }
+  }
+  s_last = now;
+  g_mkwWebDvdReads = 0;
+  g_mkwWebDvdWaitMs = 0.0;
+  g_mkwWebPipelinesStarted = 0;
+  g_mkwWebPipelineWaitMs = 0.0;
+  if (now - s_windowStart < std::chrono::seconds(2) || s_intervals.empty()) {
+    return;
+  }
+  std::vector<float> sorted = s_intervals;
+  std::sort(sorted.begin(), sorted.end());
+  const auto at = [&](double q) { return sorted[std::min(sorted.size() - 1, static_cast<size_t>(q * sorted.size()))]; };
+  const size_t slow = static_cast<size_t>(std::count_if(sorted.begin(), sorted.end(), [](float v) { return v > 25.0f; }));
+  Log.info("[web-pacing] {} frames: median {:.1f} ms, p95 {:.1f} ms, max {:.1f} ms, {} over 25 ms", sorted.size(),
+           at(0.5), at(0.95), sorted.back(), slow);
+  s_intervals.clear();
+  s_windowStart = now;
+}
+#endif
+
 bool present_presentation_job(const PresentationJob& job) {
+#if defined(__EMSCRIPTEN__)
+  record_web_present_interval();
+#endif
   ZoneScoped;
   const auto submissionStarted = PresentClock::now();
   // Keep the threshold far above compositor and scheduling jitter. The timings below separate a

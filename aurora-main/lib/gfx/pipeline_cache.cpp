@@ -1077,6 +1077,8 @@ static void pipeline_worker() {
 #if defined(__EMSCRIPTEN__)
 using AsyncPipelineSink = std::function<void(wgpu::RenderPipeline)>;
 static AsyncPipelineSink* g_asyncPipelineSink = nullptr;
+extern "C" uint32_t g_mkwWebPipelinesStarted;
+extern "C" double g_mkwWebPipelineWaitMs;
 static size_t g_asyncPipelinesInFlight = 0;
 // Enough to keep the browser's compiler busy without flooding the GPU process.
 constexpr size_t MaxAsyncPipelinesInFlight = 64;
@@ -1110,6 +1112,7 @@ static void start_async_pipeline(PendingPipeline pending) {
     finish_async_pipeline(hash, firstFrameUsed, std::move(pipeline));
   };
   ++g_asyncPipelinesInFlight;
+  ++g_mkwWebPipelinesStarted;
   g_asyncPipelineSink = &sink;
   auto pipeline = pending.create();
   g_asyncPipelineSink = nullptr;
@@ -1420,12 +1423,14 @@ static bool wait_pipeline_impl(PipelineRef ref, wgpu::RenderPipeline& pipeline, 
     }
 #if defined(__EMSCRIPTEN__)
     if (g_asyncPipelines) {
+      const double waitStart = emscripten_get_now();
       while (!finished()) {
         lock.unlock();
         launch_async_pipelines();
         emscripten_sleep(0);  // completion callbacks arrive from the browser's event loop
         lock.lock();
       }
+      g_mkwWebPipelineWaitMs += emscripten_get_now() - waitStart;
     } else
 #endif
     g_pipelineCv.wait(lock, finished);

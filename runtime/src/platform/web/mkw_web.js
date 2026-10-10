@@ -152,11 +152,40 @@ addToLibrary({
       return written;
     },
 
+    // Background warm-up of whole files the game reads at random offsets (the sound archive
+    // is read in ~30 scattered pieces when a race starts). Two blocks in flight at a time so
+    // foreground reads never queue behind it.
+    async prefetchFile(url) {
+      if (!MkwDisc.sizes.has(url)) {
+        await MkwDisc.fetchBlock(url, 0);
+      }
+      const size = MkwDisc.sizes.get(url);
+      if (size === undefined) return;
+      const blocks = Math.ceil(size / MkwDisc.blockSize);
+      let next = 0;
+      const worker = async () => {
+        while (next < blocks) {
+          const index = next++;
+          await MkwDisc.fetchBlock(url, index);
+        }
+      };
+      await Promise.all([worker(), worker()]);
+    },
+
     // Streaming access is sequential: keep the next block warming while this one is used.
     readAhead(url, offset, length) {
       const next = Math.floor((offset + length) / MkwDisc.blockSize) + 1;
       for (const index of [next - 1, next]) MkwDisc.fetchBlock(url, index);
     },
+  },
+
+  // Called once from main(): warms Module.mkwPrefetch (paths relative to the DVD root).
+  mkw_web_start_prefetch__deps: ['$MkwDisc'],
+  mkw_web_start_prefetch: () => {
+    const base = Module['mkwGameUrl'] ?? 'game';
+    for (const path of Module['mkwPrefetch'] ?? []) {
+      MkwDisc.prefetchFile(`${base}/${path}`).catch((e) => err(`prefetch ${path}: ${e}`));
+    }
   },
 
   mkw_web_read_file__deps: ['$MkwDisc'],

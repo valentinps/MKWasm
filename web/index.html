@@ -14,6 +14,8 @@
      SDL only rewrites the CSS size when devicePixelRatio != 1, so a zoom change back to 100%
      would otherwise leave a stale size behind; the backing store already tracks the viewport. */
   #canvas[style*="position: fixed"] { width: 100vw !important; height: 100vh !important; }
+  #play { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: #0008;
+          color: #fff; font: 600 20px/1.4 system-ui, sans-serif; cursor: pointer; z-index: 2; }
   #status { position: fixed; left: 12px; bottom: 12px; padding: 6px 10px; background: #000a; border-radius: 4px; white-space: pre-wrap; max-width: 80vw; }
 </style>
 </head>
@@ -98,6 +100,8 @@ dvd_root = "${DVD_ROOT}"
     canvas: document.getElementById('canvas'),
     mkwDvdRoot: DVD_ROOT,
     mkwGameUrl: 'game',
+    // Files warmed into the disc cache in the background (random-access reads at race start).
+    mkwPrefetch: ['files/sound/revo_kart.brsar'],
     locateFile: (name) => `build/${name}`,
     print: (text) => { mkwLog.push(text); streamLog(text); console.log(text); },
     printErr: (text) => { mkwLog.push(text); streamLog(text); console.warn(text); },
@@ -138,6 +142,23 @@ dvd_root = "${DVD_ROOT}"
     }
     return e?.stack ?? e?.message ?? String(e);
   };
+  // SDL's fill-document mode moves everything else on the page into a hidden container.
+  // Bring the status line back, and ask for a click: keyboard input needs the canvas focused
+  // and browsers only start audio after a user gesture.
+  new MutationObserver((_, observer) => {
+    if (!document.getElementById('SDL3_fill_document_background_elements')) return;
+    observer.disconnect();
+    statusEl.style.zIndex = 3;
+    document.body.appendChild(statusEl);
+    const play = document.createElement('div');
+    play.id = 'play';
+    play.textContent = 'Click to play';
+    play.addEventListener('pointerdown', () => {
+      play.remove();
+      Module.canvas.focus();
+    }, {once: true});
+    document.body.appendChild(play);
+  }).observe(document.body, {childList: true});
   window.addEventListener('error', (e) => { const text = describe(e.error ?? e.message); mkwLog.push(`[error] ${text}`); setStatus(`Error: ${text}`); });
   window.addEventListener('unhandledrejection', (e) => { const text = describe(e.reason); mkwLog.push(`[rejection] ${text}`); setStatus(`Error: ${text}`); });
 </script>
