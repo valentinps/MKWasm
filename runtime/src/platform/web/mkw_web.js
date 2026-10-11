@@ -44,7 +44,9 @@ addToLibrary({
   // number, which a Suspending import passes through without suspending at all.
   $MkwDisc: {
     blockSize: 1 << 20,
-    maxBytes: 512 << 20,
+    // The cache lives in the tab's JS heap. LRU keeps what the current scene reads; prefetched
+    // blocks that were never read carry the oldest stamps, so they are the first to go.
+    maxBytes: 192 << 20,
     blocks: new Map(),   // `${url}#${index}` -> {bytes, promise, used}
     sizes: new Map(),    // url -> file size, learned from Content-Range
     missing: new Set(),  // urls that returned 404
@@ -306,6 +308,7 @@ addToLibrary({
     pending: [],
     posted: 0,
     consumed: 0,
+    underruns: 0,
     channels: 2,
     gain: 1,
     processorSource: `
@@ -320,6 +323,7 @@ addToLibrary({
           this.consumed = 0;
           this.playing = false;
           this.ticks = 0;
+          this.underruns = 0;
           this.port.onmessage = (e) => { this.queue.push(e.data); this.queued += e.data.length / this.channels; };
         }
         process(inputs, outputs) {
@@ -336,10 +340,13 @@ addToLibrary({
             }
             this.queued -= i;
             this.consumed += i;
-            if (!this.queue.length) this.playing = false;  // underrun: rebuild the prebuffer
+            if (!this.queue.length) {
+              this.playing = false;  // underrun: rebuild the prebuffer
+              if (i < frames) this.underruns++;
+            }
           }
           for (; i < frames; i++) for (let c = 0; c < out.length; c++) out[c][i] = 0;
-          if ((++this.ticks & 7) === 0) this.port.postMessage(this.consumed);
+          if ((++this.ticks & 7) === 0) this.port.postMessage([this.consumed, this.underruns]);
           return true;
         }
       }
@@ -353,6 +360,7 @@ addToLibrary({
       Module['mkwAudioState'] = () => ({
         state: ctx.state, rate: ctx.sampleRate, posted: MkwAudio.posted, consumed: MkwAudio.consumed,
         queuedMs: Math.round(1000 * (MkwAudio.posted - MkwAudio.consumed) / ctx.sampleRate),
+        underruns: MkwAudio.underruns,
       });
       const resume = () => { if (ctx.state !== 'running') ctx.resume(); };
       for (const type of ['pointerdown', 'keydown']) window.addEventListener(type, resume, {capture: true});
@@ -363,7 +371,15 @@ addToLibrary({
       const node = new AudioWorkletNode(ctx, 'mkw-player', {
         numberOfInputs: 0, outputChannelCount: [channels], processorOptions: {channels},
       });
-      node.port.onmessage = (e) => { MkwAudio.consumed = e.data; };
+      node.port.onmessage = (e) => {
+        const [consumed, underruns] = e.data;
+        MkwAudio.consumed = consumed;
+        // An underrun is an audible gap; log each one (they are rare) to line up with frame spikes.
+        if (underruns !== MkwAudio.underruns && ctx.state === 'running') {
+          MkwAudio.underruns = underruns;
+          err(`[web-audio] underrun #${underruns}`);
+        }
+      };
       const gainNode = ctx.createGain();
       gainNode.gain.value = MkwAudio.gain;
       node.connect(gainNode).connect(ctx.destination);

@@ -76,10 +76,19 @@ const server = http.createServer((req, res) => {
       res.writeHead(404).end();
       return;
     }
+    // Validators let the browser revalidate instead of re-downloading (the wasm is ~150 MB),
+    // and a module served from the HTTP cache lets V8 reuse its compiled code across visits.
+    const etag = `"${stat.size.toString(16)}-${Math.floor(stat.mtimeMs).toString(16)}"`;
+    if (!req.headers.range && req.headers['if-none-match'] === etag) {
+      res.writeHead(304, {'ETag': etag, 'Cache-Control': 'no-cache'}).end();
+      return;
+    }
     const headers = {
       'Content-Type': types[path.extname(file)] ?? 'application/octet-stream',
       'Accept-Ranges': 'bytes',
       'Cache-Control': 'no-cache',
+      'ETag': etag,
+      'Last-Modified': stat.mtime.toUTCString(),
       // Lets the page use the JS Self-Profiling API (new Profiler()) for wasm/JS sampling.
       'Document-Policy': 'js-profiling',
     };

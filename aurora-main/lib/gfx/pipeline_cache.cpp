@@ -26,6 +26,7 @@
 
 #if defined(__EMSCRIPTEN__)
 #include <emscripten/emscripten.h>
+extern "C" int mkw_web_sleep(double milliseconds);  // platform/web/mkw_web.js
 #endif
 
 namespace aurora::gfx {
@@ -1080,8 +1081,13 @@ static AsyncPipelineSink* g_asyncPipelineSink = nullptr;
 extern "C" uint32_t g_mkwWebPipelinesStarted;
 extern "C" double g_mkwWebPipelineWaitMs;
 static size_t g_asyncPipelinesInFlight = 0;
-// Enough to keep the browser's compiler busy without flooding the GPU process.
-constexpr size_t MaxAsyncPipelinesInFlight = 64;
+// During the boot prewarm the browser's shader cache answers most compiles at once, so a deep
+// queue keeps it busy. Afterwards a pipeline the browser has never seen takes ~0.3-0.7 s in the
+// GPU process, and a pass that must wait for one (a persistent resolve such as a course's
+// minimap bake) waits behind everything already in flight: with 64 in flight that was 20-48 s
+// on the first visit to a course. Gameplay keeps the queue shallow.
+constexpr size_t MaxAsyncPipelinesInFlightPrewarm = 64;
+constexpr size_t MaxAsyncPipelinesInFlight = 8;
 
 static void finish_async_pipeline(PipelineRef hash, uint32_t firstFrameUsed, wgpu::RenderPipeline pipeline) {
   --g_asyncPipelinesInFlight;
@@ -1124,7 +1130,9 @@ static void start_async_pipeline(PendingPipeline pending) {
 
 // Starts queued compiles, priority (first-use) pipelines first.
 static void launch_async_pipelines() {
-  while (g_asyncPipelinesInFlight < MaxAsyncPipelinesInFlight) {
+  const size_t limit = g_prewarmActive.load(std::memory_order_acquire) ? MaxAsyncPipelinesInFlightPrewarm
+                                                                       : MaxAsyncPipelinesInFlight;
+  while (g_asyncPipelinesInFlight < limit) {
     PendingPipeline pending;
     {
       std::lock_guard lock{g_pipelineMutex};
@@ -1427,8 +1435,19 @@ static bool wait_pipeline_impl(PipelineRef ref, wgpu::RenderPipeline& pipeline, 
       while (!finished()) {
         lock.unlock();
         launch_async_pipelines();
-        emscripten_sleep(0);  // completion callbacks arrive from the browser's event loop
+        // Completion callbacks arrive from the browser's event loop. Yield through a message
+        // task rather than emscripten_sleep (setTimeout), which a hidden page clamps to 1 s.
+        mkw_web_sleep(0);
         lock.lock();
+        static double s_lastWaitReport = 0.0;
+        const double now = emscripten_get_now();
+        if (now - waitStart > 1000.0 && now - s_lastWaitReport > 1000.0) {
+          s_lastWaitReport = now;
+          Log.warn("[web-pipeline] waiting {:.1f} s for pipeline 0x{:x}: {} in flight, {} priority + {} background "
+                   "queued",
+                   (now - waitStart) / 1000.0, static_cast<uint64_t>(ref), g_asyncPipelinesInFlight,
+                   g_priorityPipelines.size(), g_backgroundPipelines.size());
+        }
       }
       g_mkwWebPipelineWaitMs += emscripten_get_now() - waitStart;
     } else

@@ -62,7 +62,7 @@
   const DVD_ROOT = '/dvd';
   // Automated dev runs (?autorace, ?autokeys) press through menus, which creates licences and
   // writes saves; they get their own IndexedDB store so the player's saves stay untouched.
-  const AUTOMATED = ['autorace', 'autokeys', 'autowfc'].some((name) => new URLSearchParams(location.search).has(name));
+  const AUTOMATED = ['autorace', 'autokeys', 'autowfc', 'autoidle'].some((name) => new URLSearchParams(location.search).has(name));
   const DATA_HOME = AUTOMATED ? '/userdata-dev' : '/userdata';
   const CONFIG = `# WiiCompiled web configuration
 [video]
@@ -197,10 +197,14 @@ dvd_root = "${DVD_ROOT}"
   //                        dump and a B press.
   //   ?autokeys=x,x,down,x play a key sequence (x z up down left right enter, or wait), one key
   //                        every ~1.8 s, logging the menu section/page before each.
+  //   &click               with any of these: wait for a real click first, so audio runs.
+  //   &soak[=seconds]       with ?autorace: keep racing (default 30 min), logging memory.
+  //   ?autoidle[=seconds]  no input: attract-mode demo races cycle courses (default 30 min),
+  //                        logging memory; a long-session check for leaks and crashes.
   //   ?autowfc[=presses]   go to Nintendo WFC from the main menu and keep confirming prompts
   //                        (default 12 presses), logging every page; pair it with ?online.
   if (['localhost', '127.0.0.1'].includes(location.hostname) &&
-      ['autorace', 'autokeys', 'autowfc'].some((name) => new URLSearchParams(location.search).has(name))) {
+      ['autorace', 'autokeys', 'autowfc', 'autoidle'].some((name) => new URLSearchParams(location.search).has(name))) {
     const params = new URLSearchParams(location.search);
     const raceSeconds = Number(params.get('autorace')) || 40;
     const say = (text) => Module.print(`[autorace] ${text}`);
@@ -225,7 +229,12 @@ dvd_root = "${DVD_ROOT}"
     const seen = (text) => mkwLog.some((line) => line.includes(text));
     (async () => {
       while (!document.getElementById('play')) await sleep(250);
-      document.getElementById('play').remove();
+      // &click: wait for one real click on the overlay, the user gesture audio needs to start.
+      if (params.has('click')) {
+        say('waiting for a click');
+        while (document.getElementById('play')) await sleep(250);
+      }
+      document.getElementById('play')?.remove();
       Module.canvas.focus();
       say('started');
       // Raceinfo::sInstance (PAL) only exists while a race scene is loaded; the title screen's
@@ -245,6 +254,20 @@ dvd_root = "${DVD_ROOT}"
         return `section ${hex(read32(section))} next ${hex(read32(manager + 0x0c))} state ${read32(manager + 0x30)}` +
                (page ? ` page ${hex(read32(page + 4))} pstate ${read32(page + 8)} (${count} active)` : '');
       };
+      if (params.has('autoidle')) {
+        // No input: the title screen cycles attract-mode demo races on different courses, which
+        // exercises scene loads for as long as the page runs. Memory is logged every 30 s.
+        const idleEnd = performance.now() + (Number(params.get('autoidle')) || 1800) * 1000;
+        while (performance.now() < idleEnd) {
+          const js = performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : -1;
+          say(`idle: wasm ${Math.round(HEAP8.length / 1048576)} MiB, js ${js} MiB, disc cache ` +
+              `${typeof MkwDisc !== 'undefined' ? Math.round(MkwDisc.cachedBytes / 1048576) : -1} MiB, ` +
+              `${inRace() ? 'demo race' : menuState()}`);
+          await sleep(30000);
+        }
+        say('done');
+        return;
+      }
       if (params.has('autowfc')) {
         // UI page ids (PAL): 0x57 title, 0x65 licence select, 0x5a main menu, 0x86 the first
         // visit's WFC permission prompt.
@@ -319,6 +342,25 @@ dvd_root = "${DVD_ROOT}"
         if (presses > 60) { say('giving up'); return; }
       }
       say(`race loaded after ${presses} presses; holding accelerate`);
+      if (params.has('soak')) {
+        // Long-session check: keep racing (accelerate held, with taps that advance the result
+        // screens into the next race) and log memory every 30 s.
+        const soakEnd = performance.now() + (Number(params.get('soak')) || 1800) * 1000;
+        let nextReport = 0;
+        while (performance.now() < soakEnd) {
+          if (performance.now() >= nextReport) {
+            const js = performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : -1;
+            say(`soak: wasm ${Math.round(HEAP8.length / 1048576)} MiB, js ${js} MiB, ${inRace() ? 'racing' : menuState()}`);
+            nextReport = performance.now() + 30000;
+          }
+          key('KeyX', true);
+          await sleep(12000);
+          key('KeyX', false);
+          for (let i = 0; i < 3; i++) { await sleep(700); await press('KeyX'); }
+        }
+        say('done');
+        return;
+      }
       key('KeyX', true);
       const raceEnd = performance.now() + raceSeconds * 1000;
       if (params.has('profile') && typeof Profiler !== 'undefined') {

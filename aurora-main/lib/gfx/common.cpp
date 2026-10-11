@@ -1,5 +1,6 @@
 #if defined(__EMSCRIPTEN__)
 #include <emscripten/emscripten.h>
+extern "C" int mkw_web_sleep(double milliseconds);  // platform/web/mkw_web.js
 #endif
 #include "common.hpp"
 #include "staging_map.hpp"
@@ -1091,7 +1092,7 @@ static bool begin_frame_impl(bool clearEfb, bool capacityResume = false) {
       }
 #if defined(__EMSCRIPTEN__)
       // Browser map callbacks are delivered from the event loop: suspend (JSPI) until then.
-      emscripten_sleep(0);
+      mkw_web_sleep(0);  // a message-task yield; see wait_pipeline_impl
       webgpu::fail_if_device_lost();
 #else
       g_instance.ProcessEvents();
