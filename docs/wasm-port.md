@@ -49,3 +49,41 @@ You can't host a translated build. The translator is C# and the backend is a ful
    4. Build aurora against emdawnwebgpu; make readback async-tolerant.
    5. Target: title screen.
 2. Measure fps. If acceptable, design the IR→wasm backend for real distribution.
+
+## Status (2026-10-11)
+
+The port runs the full game in Chrome/Edge: boot, menus, Grand Prix races, saves (IndexedDB),
+audio (AudioWorklet), keyboard and gamepads. Build with `web/build-web.sh`, serve with
+`node web/serve.mjs` (localhost only; `/game` serves your own extracted disc).
+
+### Performance (this machine, Luigi Circuit 50cc, 12 karts)
+- Menus, title, attract movies: locked 60 fps.
+- Racing: 60 fps once the pack spreads out; the bunched start runs ~110 frames per 2 s
+  (p95 ~23 ms) at ~16 ms of CPU per frame. The rest is translated guest code at wasm speed
+  (flat profile, no single hot spot); the graphics FIFO path is ~11%, audio DSP ~5%.
+- VI pacing slips instead of quantizing (`vi.cpp`, `guestBusy`): a frame that needs 18 ms
+  takes 18 ms, not 33 ms. Scene loads at race start still take 200-250 ms on the main guest
+  thread (on hardware too, behind a fade); audio keeps running through them.
+- Things tried that did not help: `-O3` for translated shards (no change), a larger
+  indirect-dispatch memo (kept, small), texture decode (negligible, ~5 ms per race start).
+
+### Dev aids (localhost only)
+- `?autorace[=seconds][&profile=seconds]`: in-page autopilot into a Grand Prix, holds
+  accelerate, optional JS self-profile written to `web-stream.log`. Uses its own save store.
+- `?autowfc`, `?autokeys=x,down,...`, `?online`, `?stream`; `web-run.log` mirrors the console.
+- `Module._mkw_debug_dump_threads()`, `Module._mkw_debug_read32(addr)`.
+- Spike lines (`[web-spike]`) attribute each slow frame: DVD waits, pipeline compiles, the
+  longest guest slice and its thread, interrupt services, texture decodes.
+
+### Online play
+- Transport works: guest sockets go through `MkwNet` → one WebSocket → `web/net-gateway.mjs`
+  (TCP + UDP, real DNS). With `?online` the game reaches `naswii.nintendowifi.net`, completes
+  TCP and TLS, and fails certificate verification, as a real Wii does today (error 20100).
+- Server side is the open problem. WiiLink WFC requires its client payload (`wl:ver`,
+  `wl:sig`); unpatched Wii clients are patched by an exploit that injects PowerPC code, which
+  a recompiled game cannot run. Upstream's supported route is Retro Rewind (its payload is
+  translated with the game) on Retro WFC. Options: Retro Rewind on the web build, or a native
+  port of the WiiLink payload agreed with WiiLink. Claiming the payload version without its
+  patches would misrepresent the client to their service, so that is not done.
+- The gateway must run where it can reach the internet (`node web/serve.mjs` in a normal
+  terminal); a public deployment would need a hosted gateway with abuse limits.

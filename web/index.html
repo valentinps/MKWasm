@@ -344,7 +344,7 @@ dvd_root = "${DVD_ROOT}"
         }
         const total = trace.samples.length;
         const top = (o, k) => Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, k).map(([n, c]) => `${(100 * c / total).toFixed(1).padStart(5)}%  ${n}`);
-        await fetch('/__logline', {method: 'POST', body: `== race profile: ${total} samples, idle ${(100 * idle / total).toFixed(1)}%\n-- self\n${top(self, 60).join('\n')}\n-- inclusive\n${top(incl, 60).join('\n')}\n-- clock callers\n${top(clockCallers, 20).join('\n')}\n`});
+        await fetch('/__logline', {method: 'POST', body: `== race profile: ${total} samples, idle ${(100 * idle / total).toFixed(1)}%\n-- self\n${top(self, 60).join('\n')}\n-- inclusive\n${top(incl, 60).join('\n')}\n-- clock callers\n${top(clockCallers, 20).join('\n')}\n-- inclusive, host side\n${top(Object.fromEntries(Object.entries(incl).filter(([n]) => !/^func_|^InvokeIndirect|^TryDispatch|^void Dispatch|^main$|^RuntimeMain/.test(n))), 60).join('\n')}\n`});
         say('profile written');
       }
       await sleep(Math.max(0, raceEnd - performance.now()));

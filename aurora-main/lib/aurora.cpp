@@ -918,6 +918,8 @@ double g_mkwWebMaxSliceMs = 0.0;
 uint32_t g_mkwWebMaxSliceThread = 0;
 int32_t g_mkwWebMaxSlicePriority = -1;
 uint32_t g_mkwWebIrqServices = 0;
+uint32_t g_mkwWebTextureConverts = 0;
+double g_mkwWebTextureConvertMs = 0.0;
 }
 
 // Web frame-pacing log: the FPS counter averages, but stutter is in the distribution.
@@ -932,18 +934,25 @@ void record_web_present_interval() noexcept {
     s_intervals.push_back(interval);
     if (interval > 50.0f) {
       Log.info("[web-spike] {:.1f} ms frame: {} DVD read(s) waited {:.1f} ms, {} pipeline(s) started, "
-               "pipeline waits {:.1f} ms, longest guest slice {:.1f} ms (thread {:#x} prio {}), {} irq service(s)",
+               "pipeline waits {:.1f} ms, longest guest slice {:.1f} ms (thread {:#x} prio {}), {} irq service(s), {} texture decode(s) {:.1f} ms",
                interval, g_mkwWebDvdReads, g_mkwWebDvdWaitMs, g_mkwWebPipelinesStarted, g_mkwWebPipelineWaitMs,
-               g_mkwWebMaxSliceMs, g_mkwWebMaxSliceThread, g_mkwWebMaxSlicePriority, g_mkwWebIrqServices);
+               g_mkwWebMaxSliceMs, g_mkwWebMaxSliceThread, g_mkwWebMaxSlicePriority, g_mkwWebIrqServices,
+               g_mkwWebTextureConverts, g_mkwWebTextureConvertMs);
     }
   }
   s_last = now;
+  static uint32_t s_windowTextureConverts = 0;
+  static double s_windowTextureConvertMs = 0.0;
+  s_windowTextureConverts += g_mkwWebTextureConverts;
+  s_windowTextureConvertMs += g_mkwWebTextureConvertMs;
   g_mkwWebDvdReads = 0;
   g_mkwWebDvdWaitMs = 0.0;
   g_mkwWebPipelinesStarted = 0;
   g_mkwWebPipelineWaitMs = 0.0;
   g_mkwWebMaxSliceMs = 0.0;
   g_mkwWebIrqServices = 0;
+  g_mkwWebTextureConverts = 0;
+  g_mkwWebTextureConvertMs = 0.0;
   if (now - s_windowStart < std::chrono::seconds(2) || s_intervals.empty()) {
     return;
   }
@@ -951,8 +960,14 @@ void record_web_present_interval() noexcept {
   std::sort(sorted.begin(), sorted.end());
   const auto at = [&](double q) { return sorted[std::min(sorted.size() - 1, static_cast<size_t>(q * sorted.size()))]; };
   const size_t slow = static_cast<size_t>(std::count_if(sorted.begin(), sorted.end(), [](float v) { return v > 25.0f; }));
-  Log.info("[web-pacing] {} frames: median {:.1f} ms, p95 {:.1f} ms, max {:.1f} ms, {} over 25 ms", sorted.size(),
-           at(0.5), at(0.95), sorted.back(), slow);
+  Log.info("[web-pacing] {} frames: median {:.1f} ms, p95 {:.1f} ms, max {:.1f} ms, {} over 25 ms; "
+           "{} texture decode(s) {:.1f} ms; last frame {} draws ({} merged), upload KiB vtx {} uni {} idx {} sto {} tex {}",
+           sorted.size(), at(0.5), at(0.95), sorted.back(), slow, s_windowTextureConverts, s_windowTextureConvertMs,
+           gfx::g_stats.drawCallCount, gfx::g_stats.mergedDrawCallCount, gfx::g_stats.lastVertSize / 1024,
+           gfx::g_stats.lastUniformSize / 1024, gfx::g_stats.lastIndexSize / 1024, gfx::g_stats.lastStorageSize / 1024,
+           gfx::g_stats.lastTextureUploadSize / 1024);
+  s_windowTextureConverts = 0;
+  s_windowTextureConvertMs = 0.0;
   s_intervals.clear();
   s_windowStart = now;
 }

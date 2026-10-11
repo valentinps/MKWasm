@@ -10,6 +10,10 @@
 #include <optional>
 #include <vector>
 
+#if defined(__EMSCRIPTEN__)
+#include <emscripten.h>
+#endif
+
 namespace aurora::gfx {
 static Module Log("aurora::gfx");
 
@@ -554,7 +558,25 @@ static ByteBuffer BuildRGBA8FromCMPR(uint32_t width, uint32_t height, uint32_t m
   return buf;
 }
 
+#if defined(__EMSCRIPTEN__)
+extern "C" uint32_t g_mkwWebTextureConverts;
+extern "C" double g_mkwWebTextureConvertMs;
+namespace {
+// Stall attribution for the web build's spike log (see record_web_present_interval).
+struct WebConvertTimer {
+  double start = emscripten_get_now();
+  ~WebConvertTimer() {
+    ++g_mkwWebTextureConverts;
+    g_mkwWebTextureConvertMs += emscripten_get_now() - start;
+  }
+};
+} // namespace
+#endif
+
 ConvertedTexture convert_texture(u32 format, uint32_t width, uint32_t height, uint32_t mips, ArrayRef<uint8_t> data) {
+#if defined(__EMSCRIPTEN__)
+  const WebConvertTimer webTimer;
+#endif
   const uint32_t maxMips = max_texture_mip_count(width, height);
   const uint32_t safeMips = std::clamp(mips, 1u, maxMips);
   if (safeMips != mips) {
