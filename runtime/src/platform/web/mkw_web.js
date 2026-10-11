@@ -75,7 +75,7 @@ addToLibrary({
       MkwDisc.cachedBytes += bytes.length;
     },
 
-    fetchBlock(url, index) {
+    fetchBlock(url, index, priority = 'high') {
       const key = MkwDisc.key(url, index);
       const existing = MkwDisc.blocks.get(key);
       if (existing) return existing.bytes ?? existing.promise;
@@ -86,7 +86,7 @@ addToLibrary({
         const end = start + MkwDisc.blockSize - 1;
         let response;
         try {
-          response = await fetch(url, {headers: {Range: `bytes=${start}-${end}`}});
+          response = await fetch(url, {headers: {Range: `bytes=${start}-${end}`}, priority});
         } catch (e) {
           err(`mkw_web_read_file: ${url}: ${e}`);
           MkwDisc.blocks.delete(key);
@@ -157,21 +157,18 @@ addToLibrary({
     // Background warm-up of whole files the game reads at random offsets (the sound archive
     // is read in ~30 scattered pieces when a race starts). Two blocks in flight at a time so
     // foreground reads never queue behind it.
+    // Background warm-up, one low-priority request at a time: the browser allows only six
+    // connections per host, and boot-time reads queued behind prefetch blocks for up to 0.7 s.
     async prefetchFile(url) {
       if (!MkwDisc.sizes.has(url)) {
-        await MkwDisc.fetchBlock(url, 0);
+        await MkwDisc.fetchBlock(url, 0, 'low');
       }
       const size = MkwDisc.sizes.get(url);
       if (size === undefined) return;
       const blocks = Math.ceil(size / MkwDisc.blockSize);
-      let next = 0;
-      const worker = async () => {
-        while (next < blocks) {
-          const index = next++;
-          await MkwDisc.fetchBlock(url, index);
-        }
-      };
-      await Promise.all([worker(), worker()]);
+      for (let index = 0; index < blocks; index++) {
+        await MkwDisc.fetchBlock(url, index, 'low');
+      }
     },
 
     // Streaming access is sequential: keep the next block warming while this one is used.
@@ -181,13 +178,16 @@ addToLibrary({
     },
   },
 
-  // Called once from main(): warms Module.mkwPrefetch (paths relative to the DVD root).
+  // Called once from main(): warms Module.mkwPrefetch (paths relative to the DVD root) once the
+  // boot sequence's own reads are done; the files are needed at race start, not before.
   mkw_web_start_prefetch__deps: ['$MkwDisc', '$MkwNet'],
   mkw_web_start_prefetch: () => {
     const base = Module['mkwGameUrl'] ?? 'game';
-    for (const path of Module['mkwPrefetch'] ?? []) {
-      MkwDisc.prefetchFile(`${base}/${path}`).catch((e) => err(`prefetch ${path}: ${e}`));
-    }
+    setTimeout(() => {
+      for (const path of Module['mkwPrefetch'] ?? []) {
+        MkwDisc.prefetchFile(`${base}/${path}`).catch((e) => err(`prefetch ${path}: ${e}`));
+      }
+    }, Module['mkwPrefetchDelayMs'] ?? 15000);
   },
 
   mkw_web_read_file__deps: ['$MkwDisc'],

@@ -119,6 +119,10 @@ dvd_root = "${DVD_ROOT}"
     mkwGameUrl: 'game',
     // Files warmed into the disc cache in the background (random-access reads at race start).
     mkwPrefetch: ['files/sound/revo_kart.brsar'],
+    // Dev aid: ?prefetchDelay=ms overrides when the prefetch starts (default 15 s after boot).
+    mkwPrefetchDelayMs: ['localhost', '127.0.0.1'].includes(location.hostname) &&
+        new URLSearchParams(location.search).has('prefetchDelay')
+      ? Number(new URLSearchParams(location.search).get('prefetchDelay')) : undefined,
     locateFile: (name) => `build/${name}`,
     print: (text) => { mkwLog.push(text); mkwLogTimes.push(performance.now()); streamLog(text); console.log(text); },
     printErr: (text) => { mkwLog.push(text); mkwLogTimes.push(performance.now()); streamLog(text); console.warn(text); },
@@ -258,6 +262,9 @@ dvd_root = "${DVD_ROOT}"
         // No input: the title screen cycles attract-mode demo races on different courses, which
         // exercises scene loads for as long as the page runs. Memory is logged every 30 s.
         const idleEnd = performance.now() + (Number(params.get('autoidle')) || 1800) * 1000;
+        // Boot time: when the title screen's page first comes up.
+        while (!/page 57 /.test(menuState()) && performance.now() < idleEnd) await sleep(100);
+        say(`title screen after ${Math.round(performance.now())} ms`);
         while (performance.now() < idleEnd) {
           const js = performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : -1;
           say(`idle: wasm ${Math.round(HEAP8.length / 1048576)} MiB, js ${js} MiB, disc cache ` +
