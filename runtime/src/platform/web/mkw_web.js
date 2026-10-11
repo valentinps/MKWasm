@@ -180,7 +180,7 @@ addToLibrary({
   },
 
   // Called once from main(): warms Module.mkwPrefetch (paths relative to the DVD root).
-  mkw_web_start_prefetch__deps: ['$MkwDisc'],
+  mkw_web_start_prefetch__deps: ['$MkwDisc', '$MkwNet'],
   mkw_web_start_prefetch: () => {
     const base = Module['mkwGameUrl'] ?? 'game';
     for (const path of Module['mkwPrefetch'] ?? []) {
@@ -398,5 +398,266 @@ addToLibrary({
   mkw_web_audio_set_gain: (gain) => {
     MkwAudio.gain = gain;
     if (MkwAudio.gainNode) MkwAudio.gainNode.gain.value = gain;
+  },
+
+  // Online play. A page has no raw sockets, so every guest TCP/UDP socket is multiplexed over
+  // one WebSocket to the network gateway (web/net-gateway.mjs, which documents the wire
+  // format). This replaces the SOCKFS WebSocket backend, which maps each connection to its
+  // own ws://host:port URL and cannot receive UDP from peers it never sent to. The C side
+  // keeps using plain BSD sockets.
+  $MkwNet__deps: ['$SOCKFS', '$FS', '$DNS'],
+  $MkwNet__postset: () => { addAtInit('MkwNet.install();'); },
+  $MkwNet: {
+    ws: null,
+    ready: false,
+    outbox: [],
+    nextId: 1,
+    sockets: new Map(),  // gateway id -> sock
+
+    install() {
+      SOCKFS.websocket_sock_ops = MkwNet.ops;
+    },
+
+    url() {
+      if (Module['mkwNetUrl']) return Module['mkwNetUrl'];
+      return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/__net`;
+    },
+
+    gateway() {
+      if (MkwNet.ws) return;
+      const ws = new WebSocket(MkwNet.url());
+      ws.binaryType = 'arraybuffer';
+      MkwNet.ws = ws;
+      ws.onopen = () => {
+        MkwNet.ready = true;
+        for (const message of MkwNet.outbox) ws.send(message);
+        MkwNet.outbox = [];
+      };
+      ws.onmessage = (event) => MkwNet.receive(new Uint8Array(event.data));
+      ws.onclose = ws.onerror = () => {
+        if (MkwNet.ws !== ws) return;
+        err('[net] gateway connection lost');
+        MkwNet.ws = null;
+        MkwNet.ready = false;
+        MkwNet.outbox = [];
+        for (const sock of MkwNet.sockets.values()) MkwNet.fail(sock, {{{ cDefs.ECONNRESET }}});
+        MkwNet.sockets.clear();
+      };
+    },
+
+    send(opcode, id, ...parts) {
+      let length = 5;
+      for (const part of parts) length += part.length;
+      const message = new Uint8Array(length);
+      message[0] = opcode;
+      new DataView(message.buffer).setUint32(1, id);
+      let offset = 5;
+      for (const part of parts) {
+        message.set(part, offset);
+        offset += part.length;
+      }
+      MkwNet.gateway();
+      if (MkwNet.ready) MkwNet.ws.send(message);
+      else MkwNet.outbox.push(message);
+    },
+
+    u16(value) {
+      return new Uint8Array([(value >> 8) & 0xff, value & 0xff]);
+    },
+
+    host(name) {
+      const bytes = new TextEncoder().encode(String(name)).subarray(0, 255);
+      const out = new Uint8Array(bytes.length + 1);
+      out[0] = bytes.length;
+      out.set(bytes, 1);
+      return out;
+    },
+
+    // Guest-visible addresses are dotted IPv4; names map to the stable fake addresses
+    // Emscripten's resolver already handed the guest for them.
+    guestAddress(name) {
+      return /^\d+\.\d+\.\d+\.\d+$/.test(name) ? name : DNS.lookup_name(name);
+    },
+
+    register(sock) {
+      if (!sock.mkwId) {
+        sock.mkwId = MkwNet.nextId++;
+        MkwNet.sockets.set(sock.mkwId, sock);
+      }
+      return sock.mkwId;
+    },
+
+    notify(sock, event) {
+      if (sock.stream) SOCKFS.emit(event, sock.stream.fd);
+    },
+
+    fail(sock, errno) {
+      if (errno) sock.error = errno;
+      sock.state = 'closed';
+      MkwNet.notify(sock, 'close');
+    },
+
+    openUdp(sock, port) {
+      if (sock.udpOpen) return;
+      sock.udpOpen = true;
+      MkwNet.send(0x04, MkwNet.register(sock), MkwNet.u16(port || 0));
+    },
+
+    receive(message) {
+      if (message.length < 5) return;
+      const view = new DataView(message.buffer, message.byteOffset, message.byteLength);
+      const sock = MkwNet.sockets.get(view.getUint32(1));
+      if (!sock) return;
+      switch (message[0]) {
+        case 0x81:  // TCP_OPEN
+          sock.state = 'open';
+          sock.sport = view.getUint16(5);
+          MkwNet.notify(sock, 'open');
+          break;
+        case 0x82:  // TCP_DATA
+          sock.recv_queue.push({addr: sock.daddr, port: sock.dport, data: message.slice(5)});
+          MkwNet.notify(sock, 'message');
+          break;
+        case 0x83:  // CLOSED
+          MkwNet.sockets.delete(sock.mkwId);
+          MkwNet.fail(sock, view.getInt32(5));
+          break;
+        case 0x84:  // UDP_OPENED
+          if (!sock.sport) sock.sport = view.getUint16(5);
+          break;
+        case 0x85: {  // UDP_DATA
+          const port = view.getUint16(5);
+          const hostLength = message[7];
+          const host = new TextDecoder().decode(message.subarray(8, 8 + hostLength));
+          sock.recv_queue.push({addr: MkwNet.guestAddress(host), port, data: message.slice(8 + hostLength)});
+          MkwNet.notify(sock, 'message');
+          break;
+        }
+      }
+    },
+
+    ops: {
+      poll(sock) {
+        let mask = 0;
+        if (sock.error) mask |= {{{ cDefs.POLLERR }}};
+        if (sock.type === {{{ cDefs.SOCK_DGRAM }}}) {
+          mask |= {{{ cDefs.POLLOUT }}};
+          if (sock.recv_queue.length) mask |= {{{ cDefs.POLLIN }}} | {{{ cDefs.POLLRDNORM }}};
+          return mask;
+        }
+        if (sock.recv_queue.length) mask |= {{{ cDefs.POLLIN }}} | {{{ cDefs.POLLRDNORM }}};
+        if (sock.state === 'open') mask |= {{{ cDefs.POLLOUT }}};
+        if (sock.state === 'closed') {
+          // A failed non-blocking connect reports writable; the caller reads SO_ERROR.
+          mask |= sock.error ? {{{ cDefs.POLLOUT }}} : ({{{ cDefs.POLLIN }}} | {{{ cDefs.POLLHUP }}} | {{{ cDefs.POLLRDHUP }}});
+        }
+        return mask;
+      },
+      ioctl(sock, request, arg) {
+        switch (request) {
+          case {{{ cDefs.FIONREAD }}}:
+            {{{ makeSetValue('arg', '0', 'sock.recv_queue.length ? sock.recv_queue[0].data.length : 0', 'i32') }}};
+            return 0;
+          case {{{ cDefs.FIONBIO }}}:
+            if ({{{ makeGetValue('arg', '0', 'i32') }}}) sock.stream.flags |= {{{ cDefs.O_NONBLOCK }}};
+            else sock.stream.flags &= ~{{{ cDefs.O_NONBLOCK }}};
+            return 0;
+          default:
+            return {{{ cDefs.EINVAL }}};
+        }
+      },
+      close(sock) {
+        if (sock.mkwId && MkwNet.sockets.has(sock.mkwId)) {
+          MkwNet.send(0x03, sock.mkwId);
+          MkwNet.sockets.delete(sock.mkwId);
+        }
+        sock.state = 'closed';
+        return 0;
+      },
+      bind(sock, addr, port) {
+        if (sock.saddr !== undefined || sock.sport !== undefined) throw new FS.ErrnoError({{{ cDefs.EINVAL }}});
+        sock.saddr = addr;
+        sock.sport = port;
+        if (sock.type === {{{ cDefs.SOCK_DGRAM }}}) MkwNet.openUdp(sock, port);
+      },
+      connect(sock, addr, port) {
+        if (sock.type === {{{ cDefs.SOCK_DGRAM }}}) {
+          sock.daddr = addr;
+          sock.dport = port;
+          MkwNet.openUdp(sock, 0);
+          return;
+        }
+        if (sock.state === 'connecting') throw new FS.ErrnoError({{{ cDefs.EALREADY }}});
+        if (sock.state === 'open') throw new FS.ErrnoError({{{ cDefs.EISCONN }}});
+        sock.daddr = addr;
+        sock.dport = port;
+        sock.state = 'connecting';
+        sock.error = null;
+        MkwNet.send(0x01, MkwNet.register(sock), MkwNet.u16(port), MkwNet.host(addr));
+        // The gateway answers asynchronously; poll() reports writable once it has.
+        if (sock.stream.flags & {{{ cDefs.O_NONBLOCK }}}) throw new FS.ErrnoError({{{ cDefs.EINPROGRESS }}});
+      },
+      listen(sock, backlog) {
+        throw new FS.ErrnoError({{{ cDefs.EOPNOTSUPP }}});
+      },
+      accept(sock) {
+        throw new FS.ErrnoError({{{ cDefs.EOPNOTSUPP }}});
+      },
+      getname(sock, peer) {
+        if (peer) {
+          if (sock.daddr === undefined) throw new FS.ErrnoError({{{ cDefs.ENOTCONN }}});
+          return {addr: sock.daddr, port: sock.dport};
+        }
+        return {addr: sock.saddr || 0, port: sock.sport || 0};
+      },
+      sendmsg(sock, buffer, offset, length, addr, port) {
+        if (ArrayBuffer.isView(buffer)) {
+          offset += buffer.byteOffset;
+          buffer = buffer.buffer;
+        }
+        const data = new Uint8Array(buffer, offset, length).slice();
+        if (sock.type === {{{ cDefs.SOCK_DGRAM }}}) {
+          if (addr === undefined || port === undefined) {
+            addr = sock.daddr;
+            port = sock.dport;
+          }
+          if (addr === undefined || port === undefined) throw new FS.ErrnoError({{{ cDefs.EDESTADDRREQ }}});
+          MkwNet.openUdp(sock, 0);
+          MkwNet.send(0x05, sock.mkwId, MkwNet.u16(port), MkwNet.host(addr), data);
+          return length;
+        }
+        if (sock.state === 'closed') throw new FS.ErrnoError(sock.daddr === undefined ? {{{ cDefs.ENOTCONN }}} : {{{ cDefs.EPIPE }}});
+        if (sock.state !== 'connecting' && sock.state !== 'open') throw new FS.ErrnoError({{{ cDefs.ENOTCONN }}});
+        // Writes while still connecting are buffered by the gateway's socket until it connects.
+        MkwNet.send(0x02, sock.mkwId, data);
+        return length;
+      },
+      recvmsg(sock, length, flags) {
+        const queued = sock.recv_queue[0];
+        if (!queued) {
+          if (sock.type === {{{ cDefs.SOCK_STREAM }}}) {
+            if (sock.state === 'closed') {
+              if (sock.error) {
+                const errno = sock.error;
+                sock.error = null;
+                throw new FS.ErrnoError(errno);
+              }
+              return null;  // orderly end of stream
+            }
+            if (sock.state !== 'connecting' && sock.state !== 'open') throw new FS.ErrnoError({{{ cDefs.ENOTCONN }}});
+          }
+          throw new FS.ErrnoError({{{ cDefs.EAGAIN }}});
+        }
+        const bytes = Math.min(length, queued.data.length);
+        const result = {buffer: queued.data.subarray(0, bytes), addr: queued.addr, port: queued.port};
+        if (flags & {{{ cDefs.MSG_PEEK }}}) return result;
+        if (sock.type === {{{ cDefs.SOCK_STREAM }}} && bytes < queued.data.length) {
+          queued.data = queued.data.subarray(bytes);  // the rest stays queued
+        } else {
+          sock.recv_queue.shift();  // datagrams beyond `length` are truncated, as POSIX does
+        }
+        return result;
+      },
+    },
   },
 });

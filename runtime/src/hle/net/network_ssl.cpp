@@ -598,6 +598,17 @@ static int MbedtlsSend(void* context, const unsigned char* data, size_t size) {
     return MBEDTLS_ERR_NET_SEND_FAILED;
 }
 
+// The handshake and write loops retry until their deadline. Natively the blocking socket's
+// receive timeout paces them; on the web build a "blocking" recv returns EAGAIN at once and
+// socket data only arrives while the page yields, so wait in poll(), which suspends (JSPI).
+static void WaitForTlsProgress(NativeSocket socket) {
+#if defined(__EMSCRIPTEN__)
+    WaitForReadable(socket, 20);
+#else
+    (void)socket;
+#endif
+}
+
 static int MbedtlsRecv(void* context, unsigned char* data, size_t size) {
     const int result = mbedtls_net_recv(context, data, size);
     // Blocking socket timeouts must leave the TLS session retryable.
@@ -751,6 +762,7 @@ static int32_t SslHandshakeImpl(SslSession& ssl) {
                 NetFail("ssl handshake TIMED OUT host=%s", ssl.hostname.c_str());
                 return SSL_ERR_FAILED;
             }
+            WaitForTlsProgress(ssl.native);
             continue;
         }
         char errorBuffer[256];
@@ -799,6 +811,7 @@ static int32_t SslWrite(SslSession& ssl, const uint8_t* data, uint32_t size) {
                 DeleteWiiSocket(ssl.socketFd);
                 return SSL_ERR_FAILED;
             }
+            WaitForTlsProgress(ssl.native);
             continue;
         }
         return SSL_ERR_FAILED;

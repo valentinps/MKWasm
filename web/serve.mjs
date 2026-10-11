@@ -3,10 +3,12 @@
 //   /        -> web/
 //   /build/  -> web-build/ (WiiCompiled.js/.wasm/.data)
 //   /game/   -> $MKW_GAME_DIR, default ../game/disc next to the repo (extracted DATA: sys/, files/)
+//   /__net   -> WebSocket network gateway for online play (net-gateway.mjs); traffic log in web-net.log
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {attachNetGateway} from './net-gateway.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
@@ -27,7 +29,7 @@ const port = Number(process.env.PORT ?? 8080);
 
 const logRequests = process.env.MKW_SERVE_LOG === '1';
 
-http.createServer((req, res) => {
+const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
   if (logRequests && url.pathname.startsWith('/game/')) {
     // Debug aid (MKW_SERVE_LOG=1): per-request timing for DVD range reads.
@@ -97,4 +99,8 @@ http.createServer((req, res) => {
     res.writeHead(200, {...headers, 'Content-Length': stat.size});
     fs.createReadStream(file).pipe(res);
   });
-}).listen(port, '127.0.0.1', () => console.log(`MKWasm dev server: http://localhost:${port}/`));
+});
+attachNetGateway(server, {
+  log: (line) => fs.appendFileSync(path.join(root, 'web-net.log'), `${new Date().toISOString()} ${line}\n`),
+});
+server.listen(port, '127.0.0.1', () => console.log(`MKWasm dev server: http://localhost:${port}/`));

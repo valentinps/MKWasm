@@ -103,6 +103,12 @@ static int MapSockOptName(uint32_t optname) {
 static in_addr ResolveDefaultInterfaceIp() {
     in_addr fallback{};
     fallback.s_addr = inet_addr("10.0.1.30");
+#if defined(__EMSCRIPTEN__)
+    // Sockets live behind the page's network gateway, which has no local address to report
+    // (getsockname would say 0.0.0.0, and the guest then retries forever). The guest only
+    // needs a plausible private address; peers reach it through the gateway's public one.
+    return fallback;
+#endif
     if (!EnsureSocketRuntime()) {
         return fallback;
     }

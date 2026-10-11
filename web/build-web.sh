@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Configure + build the WiiCompiled web (wasm) target.
 # Usage: web/build-web.sh [configure|build] [ninja targets...]
+# Extra CMake cache settings for configure: MKW_CMAKE_ARGS="-DMKW_WEB_TRANSLATED_O3=ON ...".
 # Toolchain: $MKW_TOOLS (default ../tools next to the repo) holding emsdk/, bin/ninja.exe and CMake.
 set -euo pipefail
 
@@ -31,7 +32,7 @@ if [[ "$step" == "configure" || ! -f "$BUILD/build.ninja" ]]; then
         -DCMAKE_C_FLAGS="$WEB_FLAGS" -DCMAKE_CXX_FLAGS="$WEB_FLAGS" \
         -DCMAKE_EXE_LINKER_FLAGS="-fwasm-exceptions" \
         -DAURORA_SDL3_PROVIDER=vendor -DBUILD_SHARED_LIBS=OFF \
-        -DMKW_TRANSLATED_COMPILE_JOBS="$JOBS"
+        -DMKW_TRANSLATED_COMPILE_JOBS="$JOBS" ${MKW_CMAKE_ARGS:-}
 fi
 
 if [[ "$step" != "configure" ]]; then

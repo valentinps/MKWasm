@@ -77,3 +77,7 @@ output.txt
 
 # Web build output and dev logs
 /web-build/
+/web-net.log
+/web-run.log
+/web-stream.log
+/web-requests.log

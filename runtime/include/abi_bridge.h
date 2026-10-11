@@ -301,9 +301,20 @@ struct KnownTypedNativeCpuCall {
 
 // Direct-mapped thread-local memo in front of the sorted registry lookup every bctrl performs;
 // a miss just re-runs the sorted lookup. 512 entries (12 KiB) covers the per-frame indirect
-// working set while staying L1/L2 resident, unlike 4096 which would thrash L2. Must stay a
-// power of two, the index masks with (size - 1).
-inline constexpr size_t kIndirectDispatchCacheEntries = 512;
+// working set while staying L1/L2 resident, unlike 4096 which would thrash L2. The web build
+// uses 2048 (24 KiB): a miss there costs a binary search in wasm, far more than on native.
+#if defined(__wasm__)
+inline constexpr unsigned kIndirectDispatchCacheBits = 11;
+#else
+inline constexpr unsigned kIndirectDispatchCacheBits = 9;
+#endif
+inline constexpr size_t kIndirectDispatchCacheEntries = size_t{1} << kIndirectDispatchCacheBits;
+
+// Fibonacci hashing: the slot comes from the product's top bits, which mix the whole
+// address (the low bits of a multiplicative hash only permute the key's own low bits).
+inline constexpr size_t IndirectDispatchCacheSlot(uint32_t address) noexcept {
+    return static_cast<size_t>(((address >> 2) * 2654435761u) >> (32u - kIndirectDispatchCacheBits));
+}
 
 // Namespace-scope `inline thread_local`, not function-local `static thread_local`, to avoid a
 // thread-static init epoch check on every bctrl (same as g_currentCpuContext in ppc_runtime.h).
@@ -336,8 +347,7 @@ public:
             return FindByAddressPtrSlow(address);
         }
 
-        auto& cached = g_indirectResolvedDispatchMemo[
-            ((address >> 2) * 2654435761u) & (kIndirectDispatchCacheEntries - 1)];
+        auto& cached = g_indirectResolvedDispatchMemo[IndirectDispatchCacheSlot(address)];
         if (cached.valid && cached.address == address) {
             return cached.info;
         }
@@ -356,8 +366,7 @@ public:
             return nullptr;
         }
 
-        auto& cached = g_indirectRawDispatchMemo[
-            ((address >> 2) * 2654435761u) & (kIndirectDispatchCacheEntries - 1)];
+        auto& cached = g_indirectRawDispatchMemo[IndirectDispatchCacheSlot(address)];
         if (cached.valid && cached.address == address) {
             return cached.record;
         }

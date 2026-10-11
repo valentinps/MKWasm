@@ -269,6 +269,14 @@ static DeferredDnsCompletion ResolveDeferredDns(DeferredDnsWork work) {
 }
 
 static bool LaunchDeferredDns(DeferredDnsWork work) {
+#if defined(__EMSCRIPTEN__)
+    // The web build has no threads, and needs none here: Emscripten's resolver answers at
+    // once with stable placeholder addresses that the network gateway maps back to the name
+    // (see MkwNet in platform/web/mkw_web.js). The completion is still delivered through the
+    // queue, so the guest observes the same asynchronous protocol.
+    QueueDeferredDnsCompletion(ResolveDeferredDns(work));
+    return true;
+#endif
     std::unique_ptr<std::thread> worker;
     try {
         worker = std::make_unique<std::thread>([work = std::move(work)]() mutable {
