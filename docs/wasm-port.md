@@ -41,6 +41,13 @@ You can't host a translated build. The translator is C# and the backend is a ful
 - (a) Run the .NET translator in the browser (.NET wasm) and ship clang-in-wasm. Heavy (hundreds of MB, minutes of compile).
 - (b) **New backend: IR → wasm bytecode directly** (in Rust or C#), with the runtime precompiled to wasm once (it contains no Nintendo code). The game module is generated client-side and linked against the runtime via imports and a shared memory/table. This is where a Rust rewrite actually pays off: rewrite the *translator backend*, not the game.
 
+Measured on this build (2026-10-11), for sizing those options: the translator emits 106
+shards with ~213 MB of C++; Clang at -O2 plus wasm-opt -O3 turns them into a 151 MB module in
+~8 minutes on 6 native cores. Clang compiled to wasm runs several times slower than native, so
+option (a) would cost a first-run build on the order of an hour or more per player (cacheable
+in OPFS). Option (b) avoids C++ and Clang entirely, leaving optimization to the browser engine's
+JIT, and is the realistic route to a page that only needs the disc image.
+
 ## Suggested order
 1. Local proof of concept (private, never distributed): get the existing translator output + runtime building with Emscripten.
    1. Make `RequiresCheckedAccess()` a compile-time `true` for `__wasm__` and stub out `GuestFlat`.
