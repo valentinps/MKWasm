@@ -1087,7 +1087,7 @@ static size_t g_asyncPipelinesInFlight = 0;
 // minimap bake) waits behind everything already in flight: with 64 in flight that was 20-48 s
 // on the first visit to a course. Gameplay keeps the queue shallow.
 constexpr size_t MaxAsyncPipelinesInFlightPrewarm = 64;
-constexpr size_t MaxAsyncPipelinesInFlight = 8;
+constexpr size_t MaxAsyncPipelinesInFlight = 4;
 
 static void finish_async_pipeline(PipelineRef hash, uint32_t firstFrameUsed, wgpu::RenderPipeline pipeline) {
   --g_asyncPipelinesInFlight;
@@ -1129,9 +1129,12 @@ static void start_async_pipeline(PendingPipeline pending) {
 }
 
 // Starts queued compiles, priority (first-use) pipelines first.
-static void launch_async_pipelines() {
-  const size_t limit = g_prewarmActive.load(std::memory_order_acquire) ? MaxAsyncPipelinesInFlightPrewarm
-                                                                       : MaxAsyncPipelinesInFlight;
+// `extraSlots` lets a waiter start the pipeline it needs at once instead of queueing it
+// behind compiles that nothing is waiting for.
+static void launch_async_pipelines(size_t extraSlots = 0) {
+  const size_t limit = (g_prewarmActive.load(std::memory_order_acquire) ? MaxAsyncPipelinesInFlightPrewarm
+                                                                        : MaxAsyncPipelinesInFlight) +
+                       extraSlots;
   while (g_asyncPipelinesInFlight < limit) {
     PendingPipeline pending;
     {
@@ -1434,7 +1437,8 @@ static bool wait_pipeline_impl(PipelineRef ref, wgpu::RenderPipeline& pipeline, 
       const double waitStart = emscripten_get_now();
       while (!finished()) {
         lock.unlock();
-        launch_async_pipelines();
+        // The waited pipeline is at the front of the priority queue (promoted above).
+        launch_async_pipelines(1);
         // Completion callbacks arrive from the browser's event loop. Yield through a message
         // task rather than emscripten_sleep (setTimeout), which a hidden page clamps to 1 s.
         mkw_web_sleep(0);
