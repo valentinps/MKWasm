@@ -14,8 +14,11 @@
      SDL only rewrites the CSS size when devicePixelRatio != 1, so a zoom change back to 100%
      would otherwise leave a stale size behind; the backing store already tracks the viewport. */
   #canvas[style*="position: fixed"] { width: 100vw !important; height: 100vh !important; }
-  #play { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: #0008;
-          color: #fff; font: 600 20px/1.4 system-ui, sans-serif; cursor: pointer; z-index: 2; }
+  #play { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+          gap: 18px; background: #0009; color: #fff; font: 600 20px/1.4 system-ui, sans-serif; cursor: pointer; z-index: 2; }
+  #play table { font: 400 14px/1.5 system-ui, sans-serif; border-spacing: 14px 2px; color: #ddd; }
+  #play td:first-child { text-align: right; color: #fff; font-weight: 600; }
+  #play p { margin: 0; font: 400 13px/1.4 system-ui, sans-serif; color: #aaa; }
   #status { position: fixed; left: 12px; bottom: 12px; padding: 6px 10px; background: #000a; border-radius: 4px; white-space: pre-wrap; max-width: 80vw; }
 </style>
 </head>
@@ -174,7 +177,14 @@ dvd_root = "${DVD_ROOT}"
     document.body.appendChild(statusEl);
     const play = document.createElement('div');
     play.id = 'play';
-    play.textContent = 'Click to play';
+    // Keyboard defaults from aurora's pad.cpp (used when no gamepad is connected).
+    const controls = [
+      ['Arrow keys', 'Steer / menus'], ['X', 'Accelerate, confirm (A)'], ['Z', 'Brake, back (B)'],
+      ['Space', 'Drift / hop (R)'], ['Q', 'Use item (L)'], ['T', 'Trick (D-pad up)'], ['Enter', 'Pause (Start)'],
+    ];
+    play.innerHTML = '<div>Click to play</div><table>' +
+      controls.map(([key, action]) => `<tr><td>${key}</td><td>${action}</td></tr>`).join('') +
+      '</table><p>A connected gamepad is used automatically.</p>';
     play.addEventListener('pointerdown', () => {
       play.remove();
       Module.canvas.focus();
