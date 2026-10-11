@@ -29,6 +29,10 @@
   // Keep the runtime's output for inspection (window.mkwLog) alongside the console.
   window.mkwLog = [];
   window.mkwLogTimes = [];  // performance.now() per line, for lining logs up with profiles
+  // Dev aid (?autoidle&profileBoot): sample the boot from the first script to the title screen.
+  window.mkwBootProfiler = ['localhost', '127.0.0.1'].includes(location.hostname) &&
+      new URLSearchParams(location.search).has('profileBoot') && typeof Profiler !== 'undefined'
+    ? new Profiler({sampleInterval: 1, maxBufferSize: 600000}) : null;
   // Dev aid: mirror the log to the local dev server (web/serve.mjs writes web-run.log).
   if (['localhost', '127.0.0.1'].includes(location.hostname)) {
     let posted = 0;
@@ -195,6 +199,37 @@ dvd_root = "${DVD_ROOT}"
     }, {once: true});
     document.body.appendChild(play);
   }).observe(document.body, {childList: true});
+  // JS Self-Profiling summary (the dev server sends the Document-Policy header it needs),
+  // appended to web-stream.log through /__logline, which the periodic log mirror leaves alone.
+  const summarizeProfile = async (trace, label) => {
+    const name = (i) => trace.frames[i]?.name || '(anon)';
+    const self = {}, incl = {};
+    let idle = 0;
+    for (const sample of trace.samples) {
+      if (sample.stackId === undefined) { idle++; continue; }
+      const names = new Set();
+      let first = true;
+      for (let st = trace.stacks[sample.stackId]; st; st = st.parentId !== undefined ? trace.stacks[st.parentId] : null) {
+        const n = name(st.frameId);
+        if (first) { self[n] = (self[n] || 0) + 1; first = false; }
+        if (!names.has(n)) { incl[n] = (incl[n] || 0) + 1; names.add(n); }
+      }
+    }
+    // Who calls the clock: the first wasm frame below performance.now().
+    const clockCallers = {};
+    const clockFrame = /^(now|\(anon\)|_emscripten_get_now|_clock_time_get|.*clock_gettime.*|.*steady_clock.*|.*system_clock.*)$/;
+    for (const sample of trace.samples) {
+      if (sample.stackId === undefined) continue;
+      let st = trace.stacks[sample.stackId];
+      if (!st || !['now', '(anon)'].includes(name(st.frameId))) continue;
+      while (st && clockFrame.test(name(st.frameId))) st = st.parentId !== undefined ? trace.stacks[st.parentId] : null;
+      const caller = st ? name(st.frameId) : '?';
+      clockCallers[caller] = (clockCallers[caller] || 0) + 1;
+    }
+    const total = trace.samples.length;
+    const top = (o, k) => Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, k).map(([n, c]) => `${(100 * c / total).toFixed(1).padStart(5)}%  ${n}`);
+    await fetch('/__logline', {method: 'POST', body: `== ${label}: ${total} samples, idle ${(100 * idle / total).toFixed(1)}%\n-- self\n${top(self, 60).join('\n')}\n-- inclusive\n${top(incl, 60).join('\n')}\n-- clock callers\n${top(clockCallers, 20).join('\n')}\n-- inclusive, host side\n${top(Object.fromEntries(Object.entries(incl).filter(([n]) => !/^func_|^InvokeIndirect|^TryDispatch|^void Dispatch|^main$|^RuntimeMain/.test(n))), 60).join('\n')}\n`});
+  };
   // Dev aids, no clicks needed; progress goes to the log as [autorace] lines.
   //   ?autorace[=seconds]  drive the menus into a Grand Prix race and hold accelerate for the
   //                        given time (default 40 s); a menu that stops responding gets a thread
@@ -265,6 +300,10 @@ dvd_root = "${DVD_ROOT}"
         // Boot time: when the title screen's page first comes up.
         while (!/page 57 /.test(menuState()) && performance.now() < idleEnd) await sleep(100);
         say(`title screen after ${Math.round(performance.now())} ms`);
+        if (window.mkwBootProfiler) {
+          await summarizeProfile(await window.mkwBootProfiler.stop(), 'boot profile');
+          say('profile written');
+        }
         while (performance.now() < idleEnd) {
           const js = performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : -1;
           say(`idle: wasm ${Math.round(HEAP8.length / 1048576)} MiB, js ${js} MiB, disc cache ` +
@@ -376,34 +415,7 @@ dvd_root = "${DVD_ROOT}"
         await sleep(6000);
         const profiler = new Profiler({sampleInterval: 1, maxBufferSize: 400000});
         await sleep(Number(params.get('profile')) * 1000 || 10000);
-        const trace = await profiler.stop();
-        const name = (i) => trace.frames[i]?.name || '(anon)';
-        const self = {}, incl = {};
-        let idle = 0;
-        for (const sample of trace.samples) {
-          if (sample.stackId === undefined) { idle++; continue; }
-          const names = new Set();
-          let first = true;
-          for (let st = trace.stacks[sample.stackId]; st; st = st.parentId !== undefined ? trace.stacks[st.parentId] : null) {
-            const n = name(st.frameId);
-            if (first) { self[n] = (self[n] || 0) + 1; first = false; }
-            if (!names.has(n)) { incl[n] = (incl[n] || 0) + 1; names.add(n); }
-          }
-        }
-        // Who calls the clock: the first wasm frame below performance.now().
-        const clockCallers = {};
-        const clockFrame = /^(now|\(anon\)|_emscripten_get_now|_clock_time_get|.*clock_gettime.*|.*steady_clock.*|.*system_clock.*)$/;
-        for (const sample of trace.samples) {
-          if (sample.stackId === undefined) continue;
-          let st = trace.stacks[sample.stackId];
-          if (!st || !['now', '(anon)'].includes(name(st.frameId))) continue;
-          while (st && clockFrame.test(name(st.frameId))) st = st.parentId !== undefined ? trace.stacks[st.parentId] : null;
-          const caller = st ? name(st.frameId) : '?';
-          clockCallers[caller] = (clockCallers[caller] || 0) + 1;
-        }
-        const total = trace.samples.length;
-        const top = (o, k) => Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, k).map(([n, c]) => `${(100 * c / total).toFixed(1).padStart(5)}%  ${n}`);
-        await fetch('/__logline', {method: 'POST', body: `== race profile: ${total} samples, idle ${(100 * idle / total).toFixed(1)}%\n-- self\n${top(self, 60).join('\n')}\n-- inclusive\n${top(incl, 60).join('\n')}\n-- clock callers\n${top(clockCallers, 20).join('\n')}\n-- inclusive, host side\n${top(Object.fromEntries(Object.entries(incl).filter(([n]) => !/^func_|^InvokeIndirect|^TryDispatch|^void Dispatch|^main$|^RuntimeMain/.test(n))), 60).join('\n')}\n`});
+        await summarizeProfile(await profiler.stop(), 'race profile');
         say('profile written');
       }
       await sleep(Math.max(0, raceEnd - performance.now()));
