@@ -87,3 +87,18 @@ audio (AudioWorklet), keyboard and gamepads. Build with `web/build-web.sh`, serv
   patches would misrepresent the client to their service, so that is not done.
 - The gateway must run where it can reach the internet (`node web/serve.mjs` in a normal
   terminal); a public deployment would need a hosted gateway with abuse limits.
+
+#### Proposed route for vanilla online (needs a go-ahead: it compiles third-party code)
+The translator already lowers a WWFC payload into the build (`translate-mod
+--retro-wfc-payload`, used by the `retro-rewind` profile with Retro WFC's payload). The same
+machinery can add WiiLink's genuine client payload to the vanilla game, so the server sees the
+real `wl:ver`/`wl:sig` login and the payload's security fixes actually run:
+1. Fetch the payload (`http://nas.wiilink24.com/payload?g=RMCPD00`, ~20 KB, `WWFC/Payload`);
+   the runtime already implements the ES device certificate and signing it uses.
+2. Add a `wiilink-wfc` profile: an empty Kamek `Code.pul` (32-byte v3 header, no code, no
+   commands), `enable_retro_wfc: true`, `retro_wfc_payload` pointing at that file.
+3. `translate-mod --profile wiilink-wfc ... --emit-cpp`, then `emit-build-shards` with
+   `--resolved-profile`/`--retro-cpp-dir`, and build the mod product for the web.
+4. The payload replaces `nintendowifi.net` with its own domain and sets the login URL to
+   `http://nas.<domain>/ac`, so nothing else has to change in the game.
+Retro WFC's payload (`https://rwfc.net/api/wfc/payload?g=RMCPD00`) works the same way.
